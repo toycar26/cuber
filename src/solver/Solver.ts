@@ -2,6 +2,45 @@ import CubieCube from "./CubieCube";
 import CoordCube from "./CoordCube";
 import Util from "./Util";
 
+export type SolveMethod = "kociemba" | "cfop" | "layerfirst";
+
+export interface SolveStep {
+  exp: string;
+  moveIndex: number;
+  phase: number;
+  phaseLabel: string;
+}
+
+export interface SolvePhaseInfo {
+  index: number;
+  label: string;
+  startStep: number;
+  endStep: number;
+}
+
+export interface SolveResult {
+  method: SolveMethod;
+  raw: string;
+  steps: SolveStep[];
+  phases: SolvePhaseInfo[];
+  error?: string;
+}
+
+// 阶段标签：CFOP 4 阶段；层先法 7 阶段；kociemba 单阶段
+const PHASE_LABELS: Record<SolveMethod, string[]> = {
+  kociemba: ["求解"],
+  cfop: ["Cross 底层十字", "F2L 前两层", "OLL 顶层朝向", "PLL 顶层排列"],
+  layerfirst: [
+    "1. 底层十字",
+    "2. 底层角块",
+    "3. 中层棱块",
+    "4. 顶层十字",
+    "5. 顶层角定向",
+    "6. 顶层角位置",
+    "7. 顶层棱位置",
+  ],
+};
+
 export default class Solver {
   private static MAX_PRE_MOVES = 20;
   private static TRY_INVERSE = true;
@@ -76,6 +115,171 @@ export default class Solver {
     this.initSearch();
     const solution = this.search();
     return solution;
+  }
+
+  /**
+   * 带阶段切分的求解：
+   * - kociemba：直接返回单阶段解
+   * - cfop / layerfirst：底层仍调用 kociemba 求解，再按状态进展把解序列切分为 CFOP 4 阶段或层先法 7 阶段
+   *   这是「分阶段标注」实现，不是真正的公式库求解；保证总有解、可逐步播放。
+   */
+  solvePhased(facelets: string, method: SolveMethod): SolveResult {
+    const labels = PHASE_LABELS[method];
+    const makeError = (msg: string): SolveResult => ({
+      method,
+      raw: "",
+      steps: [],
+      phases: labels.map((label, index) => ({ index, label, startStep: 0, endStep: 0 })),
+      error: msg,
+    });
+
+    const cc = new CubieCube();
+    if (!cc.deserialize(facelets)) return makeError("error: invalid cube");
+    const verify = cc.verify();
+    if (verify.length > 0) return makeError("error: " + verify);
+
+    if (method === "kociemba") {
+      const raw = this.solve(facelets).trim();
+      if (raw.startsWith("error")) return makeError(raw);
+      const exps = raw.split(/\s+/).filter(Boolean);
+      const steps: SolveStep[] = exps.map((exp, i) => ({
+        exp,
+        moveIndex: i,
+        phase: 0,
+        phaseLabel: labels[0],
+      }));
+      return {
+        method,
+        raw: exps.join(" "),
+        steps,
+        phases: [{ index: 0, label: labels[0], startStep: 0, endStep: steps.length }],
+      };
+    }
+
+    // CFOP / 层先法：先用 kociemba 求解，再按状态切分阶段
+    const raw = this.solve(facelets).trim();
+    if (raw.startsWith("error")) return makeError(raw);
+    const exps = raw.split(/\s+/).filter(Boolean);
+
+    // 把字符串动作映射回 move 索引，便于在 CubieCube 上模拟
+    const sim = new CubieCube();
+    sim.copy(cc);
+    const steps: SolveStep[] = [];
+    let lastPhase = this.phaseForState(sim, method);
+    for (let i = 0; i < exps.length; i++) {
+      const exp = exps[i];
+      const moveIdx = this.expToMove(exp);
+      // 当前动作归属的阶段 = 应用动作前的状态所处阶段
+      const phase = lastPhase;
+      steps.push({ exp, moveIndex: i, phase, phaseLabel: labels[phase] });
+      if (moveIdx >= 0) {
+        const next = new CubieCube();
+        CubieCube.CornMult(CubieCube.MoveCube[moveIdx], sim, next);
+        CubieCube.EdgeMult(CubieCube.MoveCube[moveIdx], sim, next);
+        sim.copy(next);
+      }
+      lastPhase = this.phaseForState(sim, method);
+    }
+    // 校验：应用完整解后应到达复原状态；若不一致说明 move 映射或乘法顺序出错
+    if (!Solver.isSolved(sim)) {
+      // 不阻断返回，但通过 console 给出告警便于排查
+      console.warn("[solvePhased] 模拟后未复原，阶段切分可能不准确", { raw });
+    }
+
+    // 合并相邻空阶段的边界，生成 phases 信息
+    const phases: SolvePhaseInfo[] = labels.map((label, index) => ({
+      index,
+      label,
+      startStep: -1,
+      endStep: -1,
+    }));
+    for (let i = 0; i < steps.length; i++) {
+      const p = steps[i].phase;
+      if (phases[p].startStep === -1) phases[p].startStep = i;
+      phases[p].endStep = i + 1;
+    }
+    for (const p of phases) {
+      if (p.startStep === -1) {
+        p.startStep = 0;
+        p.endStep = 0;
+      }
+    }
+
+    return { method, raw: exps.join(" "), steps, phases };
+  }
+
+  // 字符串动作（"R", "U2", "F'"）转 move 索引 0-17
+  private expToMove(exp: string): number {
+    const cleaned = exp.trim();
+    if (!cleaned) return -1;
+    const face = cleaned[0];
+    const faceIdx = "URFDLB".indexOf(face);
+    if (faceIdx < 0) return -1;
+    const axis = faceIdx; // U=0,R=1,F=2,D=3,L=4,B=5
+    let power = 0;
+    if (cleaned.length > 1) {
+      if (cleaned[1] === "2") power = 1;
+      else if (cleaned[1] === "'" || cleaned[1] === "’") power = 2;
+    }
+    return axis * 3 + power;
+  }
+
+  // 根据当前状态判断处于哪一阶段
+  private phaseForState(cube: CubieCube, method: SolveMethod): number {
+    if (method === "kociemba") return 0;
+    // 共用底层判定
+    if (!Solver.isDCrossDone(cube)) return 0; // Cross
+    if (!Solver.isDCornersDone(cube)) return method === "cfop" ? 1 : 1; // FL corners
+    if (!Solver.isMiddleDone(cube)) return method === "cfop" ? 1 : 2; // middle edges (CFOP 视为 F2L)
+    // 此时前两层完成
+    if (!Solver.isTopCrossDone(cube)) return method === "cfop" ? 2 : 3; // LL cross / OLL edges
+    if (!Solver.isTopCornersOriented(cube)) return method === "cfop" ? 2 : 4; // LL corners orient / OLL corners
+    // OLL 完成（CFOP 视角），进入 PLL
+    if (!Solver.isTopCornersPermuted(cube)) return method === "cfop" ? 3 : 5; // LL corners perm
+    if (!Solver.isTopEdgesPermuted(cube)) return method === "cfop" ? 3 : 6; // LL edges perm
+    return method === "cfop" ? 3 : 6; // solved
+  }
+
+  // D 面十字：DR(4)/DF(5)/DL(6)/DB(7) 4 条棱就位且朝向正确
+  private static isDCrossDone(cube: CubieCube): boolean {
+    for (let e = 4; e <= 7; e++) if (cube.ea[e] !== e * 2) return false;
+    return true;
+  }
+  // 复原态：所有角块/棱块就位且朝向正确
+  private static isSolved(cube: CubieCube): boolean {
+    for (let c = 0; c < 8; c++) if (cube.ca[c] !== c) return false;
+    for (let e = 0; e < 12; e++) if (cube.ea[e] !== e * 2) return false;
+    return true;
+  }
+  // D 面四角：4-7 角块就位且朝向正确
+  private static isDCornersDone(cube: CubieCube): boolean {
+    for (let c = 4; c <= 7; c++) if (cube.ca[c] !== c) return false;
+    return true;
+  }
+  // 中层棱块：FR(8)/FL(9)/BL(10)/BR(11) 就位且朝向正确
+  private static isMiddleDone(cube: CubieCube): boolean {
+    for (let e = 8; e <= 11; e++) if (cube.ea[e] !== e * 2) return false;
+    return true;
+  }
+  // 顶层十字：顶层 4 条棱朝向正确（flip=0）
+  private static isTopCrossDone(cube: CubieCube): boolean {
+    for (let e = 0; e <= 3; e++) if ((cube.ea[e] & 1) !== 0) return false;
+    return true;
+  }
+  // 顶层角定向：顶层 4 角 twist=0
+  private static isTopCornersOriented(cube: CubieCube): boolean {
+    for (let c = 0; c <= 3; c++) if ((cube.ca[c] >> 3) !== 0) return false;
+    return true;
+  }
+  // 顶层角位置：顶层 4 角归位
+  private static isTopCornersPermuted(cube: CubieCube): boolean {
+    for (let c = 0; c <= 3; c++) if ((cube.ca[c] & 7) !== c) return false;
+    return true;
+  }
+  // 顶层棱位置：顶层 4 棱归位
+  private static isTopEdgesPermuted(cube: CubieCube): boolean {
+    for (let e = 0; e <= 3; e++) if ((cube.ea[e] >> 1) !== e) return false;
+    return true;
   }
 
   private conjMask: number;

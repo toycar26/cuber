@@ -25,6 +25,7 @@
     "src/cuber/**/*",
     "src/common/**/*",
     "src/solver/**/*",
+    "src/cv/**/*",
     "src/vue/Viewport/toucher.ts",
     "src/vue/Playground/rubic.ts",
     "src/vue/Algs/algs.json"

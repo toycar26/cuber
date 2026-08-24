@@ -7,6 +7,12 @@ export default defineConfig({
   resolve: {
     extensions: [".mjs", ".js", ".ts", ".json"],
   },
+  server: {
+    proxy: {
+      "/detect": "http://localhost:8000",
+      "/health": "http://localhost:8000",
+    },
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,
