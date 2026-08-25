@@ -26,6 +26,7 @@ import {
   History,
   Home,
   Info,
+  Keyboard,
   ListChecks,
   Map as MapIcon,
   Menu,
@@ -1057,7 +1058,7 @@ function FaceNet({
           <div
             key={i}
             className="face-grid-cell"
-            style={{ background: grid ? FACE_COLORS[grid[i]] : "transparent", cursor: onCellClick && grid ? "pointer" : undefined }}
+            style={{ background: grid ? FACE_COLORS[grid[i]] : "#c8ced8", cursor: onCellClick && grid ? "pointer" : undefined }}
             title={onCellClick && grid ? "点击切换颜色" : undefined}
             onClick={onCellClick && grid ? () => onCellClick(i) : undefined}
           />
@@ -1074,6 +1075,45 @@ function FaceNet({
 
 function capturedCount(rec: Record<FaceKey, FaceKey[] | undefined>): number {
   return FACE_KEYS.reduce((n, k) => n + (rec[k] ? 1 : 0), 0);
+}
+
+const FACE_CN: Record<FaceKey, string> = {
+  U: "顶面",
+  R: "右面",
+  F: "前面",
+  D: "底面",
+  L: "左面",
+  B: "后面",
+};
+
+function MiniFaceGrid({ grid, size = 8 }: { grid?: FaceKey[]; size?: number }) {
+  return (
+    <div
+      className="mini-face-grid"
+      style={{
+        gridTemplateColumns: `repeat(3, ${size}px)`,
+        gridTemplateRows: `repeat(3, ${size}px)`,
+      }}
+    >
+      {Array.from({ length: 9 }).map((_, i) => (
+        <div
+          key={i}
+          className="mini-face-cell"
+          style={{ background: grid ? FACE_COLORS[grid[i]] : "#c8ced8" }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function stickerCounts(rec: Record<FaceKey, FaceKey[] | undefined>): Record<FaceKey, number> {
+  const counts = { U: 0, R: 0, F: 0, D: 0, L: 0, B: 0 } as Record<FaceKey, number>;
+  for (const k of FACE_KEYS) {
+    const g = rec[k];
+    if (!g) continue;
+    for (const c of g) counts[c] += 1;
+  }
+  return counts;
 }
 
 async function detectViaBackend(
@@ -1127,6 +1167,7 @@ function ScannerPanel({
   const mirroredRef = useRef(false);
   // 连续两次检测分布一致时，把该分布“锁定”在一旁，
   // 便于手持魔方时松手后再按采集键，无需稳住同时按键
+  const [liveGrid, setLiveGrid] = useState<FaceKey[]>([]);
   const [locked, setLocked] = useState<{ grid: FaceKey[]; face: FaceKey } | null>(null);
   const lockedRef = useRef<{ grid: FaceKey[]; face: FaceKey; rawKey: string } | null>(null);
   const prevDetectKeyRef = useRef("");
@@ -1143,6 +1184,7 @@ function ScannerPanel({
       setError(null);
       setPrompt("");
       setLiveReady(false);
+      setLiveGrid([]);
       liveGridRef.current = [];
       regionRef.current = null;
       lastKeyRef.current = "";
@@ -1320,7 +1362,9 @@ function ScannerPanel({
         const key = liveGridRef.current.join("");
         if (key !== lastKeyRef.current) {
           lastKeyRef.current = key;
-          setLiveReady(liveGridRef.current.length === 9);
+          const ready = liveGridRef.current.length === 9;
+          setLiveReady(ready);
+          setLiveGrid(ready ? [...liveGridRef.current] : []);
         }
         if (nextPrompt !== lastPromptRef.current) {
           lastPromptRef.current = nextPrompt;
@@ -1423,6 +1467,19 @@ function ScannerPanel({
     setTarget(null);
   };
 
+  useEffect(() => {
+    if (!open || phase !== "capture") return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.code !== "Space" && event.key !== " ") return;
+      const tag = (event.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      event.preventDefault();
+      if (lockedRef.current || liveGridRef.current.length === 9) capture();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, phase]);
+
   // 主动清除当前锁定（分布陈旧或不想使用时）
   const clearLock = () => {
     lockedRef.current = null;
@@ -1464,93 +1521,145 @@ function ScannerPanel({
     onConfirm(result);
   };
 
+  const rediscover = () => {
+    clearLock();
+    liveGridRef.current = [];
+    regionRef.current = null;
+    lastKeyRef.current = "";
+    setLiveReady(false);
+    setLiveGrid([]);
+    const msg = "正在搜索魔方…请将魔方一个面朝向镜头";
+    lastPromptRef.current = msg;
+    setPrompt(msg);
+  };
+
   if (!open) return null;
   const validation = phase === "review" ? validateState(captured) : null;
+  const colorCounts = phase === "review" ? stickerCounts(captured) : null;
+  const suggestedFace = target ?? (liveGrid.length === 9 ? identifyFace(liveGrid) : "U");
 
   return (
-    <Modal title="摄像头录入魔方状态" open={open} onClose={onClose} className="scanner-modal">
+    <Modal title="魔方状态录入" open={open} onClose={onClose} className="scanner-modal">
       <video ref={videoRef} className="scanner-video-hidden" playsInline muted />
       {error && <div className="scanner-error">{error}</div>}
       {phase === "intro" && (
         <div className="scanner-intro">
-          <p>通过摄像头自动识别魔方颜色并录入到 3D 魔方。请允许浏览器使用摄像头。</p>
-
-          <div className="option-group">
-            <strong>检测服务</strong>
-            <div className="backend-connect">
-              <span className={backendConnected ? "status-ok" : "status-warn"}>
-                {backendStatus}
-              </span>
-            </div>
-            <small className="hint">
-              打开后自动连接检测服务。若显示"无法连接"，请启动后端服务：
+          <p>通过摄像头智能识别实体魔方的 6 面颜色分布，将真实物理魔方状态实时同步至 3D 仿真模型，便于进行 AI 辅助教学与算法求解。</p>
+          <ul className="scanner-tips">
+            <li>点击“开始录入”后，将实体魔方的各个面逐一正对镜头。</li>
+            <li>系统将自动识别当前面的 3x3 九格颜色分布，按提示依次完成 6 个面的采集。</li>
+            <li>在光线均匀、背景简洁的环境下识别更加稳定准确。</li>
+            <li>录入完成后可在 2D 展开图中进行颜色微调与朝向校正，确认无误即可同步至 3D 模型。</li>
+          </ul>
+          {!backendConnected && (
+            <small className="hint scanner-backend-hint">
+              检测服务{backendStatus}。若无法识别，请启动后端服务：
               <code>cd cuber-server && pip install -r requirements.txt && python main.py</code>
             </small>
-          </div>
-
-          <ul className="scanner-tips">
-            <li>点击"开始录入"后，将魔方一个面正对镜头即可自动识别。</li>
-            <li>按提示依次采集 6 个面，光线均匀、背景简洁时识别更稳定。</li>
-          </ul>
+          )}
           <div className="modal-actions">
             <button onClick={onClose}>取消</button>
-            <button className="primary" onClick={() => setPhase("capture")}>开始录入</button>
+            <button className="primary" onClick={() => setPhase("capture")}>
+              <Camera />
+              开始录入
+            </button>
           </div>
         </div>
       )}
       {phase === "capture" && (
         <div className="scanner-capture">
-          <div className="scanner-stage">
-            <canvas ref={canvasRef} className="scanner-canvas" />
-          </div>
-          <div className="scanner-prompt">{prompt || "正在启动摄像头…"}</div>
-          <div className="scanner-chips">
+          <div className="scanner-face-tabs">
             {FACE_KEYS.map((k) => (
-              <span key={k} className={`scanner-chip ${captured[k] ? "done" : ""}`} style={{ background: captured[k] ? FACE_COLORS[k] : undefined }}>
-                {k}
-              </span>
+              <button
+                key={k}
+                type="button"
+                className={`scanner-face-tab ${suggestedFace === k ? "active" : ""} ${captured[k] ? "done" : ""}`}
+                onClick={() => setTarget(k)}
+              >
+                <MiniFaceGrid grid={captured[k]} size={7} />
+                <span className="scanner-face-tab-letter" style={{ background: FACE_COLORS[k], color: contrastColor(FACE_COLORS[k]) }}>{k}</span>
+                <span className="scanner-face-tab-name">{FACE_CN[k]}</span>
+              </button>
             ))}
           </div>
-          {locked && (
-            <div className="scanner-locked">
-              <div className="face-grid">
-                {Array.from({ length: 9 }).map((_, i) => (
-                  <div key={i} className="face-grid-cell" style={{ background: FACE_COLORS[locked.grid[i]] }} />
-                ))}
+          <div className="scanner-capture-body">
+            <div className="scanner-capture-main">
+              <div className="scanner-stage">
+                <canvas ref={canvasRef} className="scanner-canvas" />
               </div>
-              <div className="scanner-locked-info">
-                <span className="scanner-locked-badge">已锁定 {locked.face} 面</span>
-                <span className="scanner-locked-hint">分布已保存，可松开魔方后点"采集锁定"录入</span>
-                <button type="button" className="scanner-locked-clear" onClick={clearLock}>清除锁定</button>
+              <div className="scanner-prompt">
+                <Sparkles />
+                {prompt || "正在启动摄像头..."}
               </div>
             </div>
-          )}
-          {target && <div className="scanner-target">目标面：{target}（{FACE_ORIENTATION_HINTS[target]}）</div>}
-          <div className="scanner-orientation-rules">
-            <div className="scanner-orientation-title">面朝向规则（正对镜头 → 朝上）</div>
-            <div className="scanner-orientation-list">
-              {FACE_KEYS.map((k) => {
-                const onTop = ON_TOP_FACE[k];
-                return (
-                  <div key={k} className={`scanner-orientation-row ${target === k ? "active" : ""}`}>
-                    <span className="face-letter" style={{ background: FACE_COLORS[k], color: contrastColor(FACE_COLORS[k]) }}>{k}</span>
-                    <span className="arrow">→</span>
-                    <span className="face-letter" style={{ background: FACE_COLORS[onTop], color: contrastColor(FACE_COLORS[onTop]) }}>{onTop}</span>
+            <aside className="scanner-capture-side">
+              <div className="scanner-side-card scanner-locked-card">
+                <div className="scanner-side-head">
+                  <strong>已锁定面</strong>
+                  <button type="button" className="scanner-side-action" onClick={rediscover}>
+                    <RefreshCw />
+                    寻找魔方
+                  </button>
+                </div>
+                <MiniFaceGrid grid={locked?.grid} size={22} />
+                <div className="scanner-side-meta">
+                  {locked
+                    ? `已锁定 ${locked.face} 面，可松开魔方后点“采集锁定”录入`
+                    : "尚未锁定，对准稳定后将自动锁定当前面"}
+                </div>
+              </div>
+              <div className="scanner-side-card">
+                <div className="scanner-side-head">
+                  <strong><Keyboard /> 快捷录入</strong>
+                </div>
+                <p>对准稳定后按 <b>空格键 (Space)</b> 快速完成采集</p>
+              </div>
+              <div className="scanner-side-card">
+                <div className="scanner-side-head">
+                  <strong><Compass /> 朝向指引</strong>
+                </div>
+                <div className="scanner-orientation-rules">
+                  <div className="scanner-orientation-title">面朝向规则（正对镜头 → 朝上）</div>
+                  <div className="scanner-orientation-list">
+                    {FACE_KEYS.map((k) => {
+                      const onTop = ON_TOP_FACE[k];
+                      return (
+                        <div key={k} className={`scanner-orientation-row ${suggestedFace === k ? "active" : ""}`}>
+                          <span className="face-letter" style={{ background: FACE_COLORS[k], color: contrastColor(FACE_COLORS[k]) }}>{k}</span>
+                          <span className="arrow">→</span>
+                          <span className="face-letter" style={{ background: FACE_COLORS[onTop], color: contrastColor(FACE_COLORS[onTop]) }}>{onTop}</span>
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
-            </div>
+                </div>
+              </div>
+            </aside>
           </div>
           <div className="modal-actions scanner-actions">
-            <button onClick={() => { setTarget(null); setPhase("intro"); }}>返回</button>
-            <button disabled={!liveReady && !locked} onClick={capture}>{locked ? "采集锁定" : "采集"}</button>
-            <button disabled={doneCount < 6} onClick={() => setPhase("review")}>完成 ({doneCount}/6)</button>
+            <button onClick={() => { setTarget(null); setPhase("intro"); }}>返回说明</button>
+            <button className="primary" disabled={!liveReady && !locked} onClick={capture}>
+              <Camera />
+              {locked ? `采集锁定 (${locked.face} 面)` : `采集此面 (${suggestedFace} 面)`}
+            </button>
+            <button disabled={doneCount < 6} onClick={() => setPhase("review")}>
+              <Check />
+              检查展开图 ({doneCount}/6)
+            </button>
           </div>
         </div>
       )}
       {phase === "review" && (
         <div className="scanner-review">
-          <p>下方为识别到的 2D 展开图。点击贴纸可循环切换颜色手动校正；可旋转单面修正朝向，或重新扫描。确认与魔方一致后点击“确定涂色”。</p>
+          <p>下方为 6 面展开图。点击任意贴纸色块可手动循环切换颜色；点击旋转按钮可修正方向。确认与实体魔方完全一致后点击“同步至 3D 模型”。</p>
+          <div className="scanner-count-row">
+            {FACE_KEYS.map((k) => (
+              <span key={k} className="scanner-count-chip">
+                <i style={{ background: FACE_COLORS[k] }} />
+                {FACE_CN[k]}: {colorCounts?.[k] ?? 0}/9
+              </span>
+            ))}
+          </div>
           <div className="scanner-net">
             <div className="net-top"><FaceNet face="U" grid={captured.U} onRotate={() => rotate("U")} onRescan={() => rescan("U")} onCellClick={(i) => editCell("U", i)} /></div>
             <div className="net-row">
@@ -1565,7 +1674,10 @@ function ScannerPanel({
           )}
           <div className="modal-actions">
             <button onClick={() => setPhase("capture")}>继续采集</button>
-            <button className="primary" onClick={confirm}>确定涂色</button>
+            <button className="primary" onClick={confirm}>
+              <Check />
+              同步至 3D 模型
+            </button>
           </div>
         </div>
       )}
