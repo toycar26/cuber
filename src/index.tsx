@@ -9,6 +9,7 @@ import React, {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
+import { createPortal } from "react-dom";
 import {
   ArrowUpRight,
   BookOpen,
@@ -23,7 +24,6 @@ import {
   Layers,
   FastForward,
   HelpCircle,
-  History,
   Home,
   Info,
   Keyboard,
@@ -44,19 +44,26 @@ import {
   SkipForward,
   SlidersHorizontal,
   Sparkles,
+  Timer,
   Trash2,
   X,
 } from "lucide-react";
 import * as THREE from "three";
+import "@fontsource/chakra-petch/600.css";
+import "@fontsource/chakra-petch/700.css";
+import "@fontsource/outfit/500.css";
+import "@fontsource/outfit/600.css";
+import "@fontsource/outfit/700.css";
+import "@fontsource/outfit/800.css";
 import "./index.css";
 import World from "./cuber/world";
 import Cubelet from "./cuber/cubelet";
 import { COLORS, FACE } from "./cuber/define";
 import { PaletteData, PreferanceData } from "./data";
 import { TwistAction, TwistNode } from "./cuber/twister";
+import tweener from "./cuber/tweener";
 import Toucher from "./vue/Viewport/toucher";
-import Rubic from "./vue/Playground/rubic";
-import Solver, { SolveMethod, SolveResult } from "./solver/Solver";
+import Solver, { SolveMethod, SolvePhaseInfo, SolveResult, SolveStep } from "./solver/Solver";
 import {
   FACE_COLORS,
   FACE_ENUM,
@@ -93,7 +100,8 @@ import {
   readRoute,
   routeToUrl,
 } from "./shell/routing";
-import { AppTopNav, HeroChrome, SubTabBar } from "./shell/HeroHome";
+import { AppTopNav, BrandLogo, HeroChrome, SubTabBar } from "./shell/HeroHome";
+import { ChatPanel, HomeAgentPeek } from "./components/ChatPanel";
 
 /** @deprecated legacy mode ids still appear in a few share / help strings */
 type Mode = "playground" | "helper" | "algs" | "director" | "player" | "help" | AppMode;
@@ -282,7 +290,7 @@ function Modal({
   backdropClassName?: string;
 }) {
   if (!open) return null;
-  return (
+  return createPortal(
     <div className={`modal-backdrop ${backdropClassName}`} role="dialog" aria-modal="true">
       <div className={`modal ${className}`}>
         <header>
@@ -293,7 +301,8 @@ function Modal({
         </header>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -428,6 +437,7 @@ function SettingsPanel({
                     ctx.world.order = order;
                     ctx.preferance.refresh();
                     onOrder?.();
+                    force((i) => i + 1);
                   }}
                 >
                   {order} 阶
@@ -492,7 +502,15 @@ function SettingsPanel({
     return (
       <>
         <div className={`settings-inline-panel ${scrubbingCamera ? "scrubbing-preview" : ""}`}>{settingsBody}</div>
-        <Modal title="Cuber 使用帮助" open={helpOpen} onClose={() => setHelpOpen(false)} className="help-modal">
+        <Modal
+          title="CubeTutor 使用帮助"
+          open={helpOpen}
+          onClose={() => {
+            setHelpOpen(false);
+            if (variant === "inline" && activeTab === "help") onTabChange?.("appear");
+          }}
+          className="help-modal"
+        >
           <div className="help-modal-body">
             <HelpContent compact />
             <div className="danger-zone">
@@ -551,7 +569,7 @@ function SettingsPanel({
       >
         {settingsBody}
       </Modal>
-      <Modal title="Cuber 使用帮助" open={helpOpen} onClose={() => setHelpOpen(false)} className="help-modal">
+      <Modal title="CubeTutor 使用帮助" open={helpOpen} onClose={() => setHelpOpen(false)} className="help-modal">
         <div className="help-modal-body">
           <HelpContent compact />
           <div className="danger-zone">
@@ -707,6 +725,10 @@ const Playbar = forwardRef<
   }, [ctx.world, playing]);
   useEffect(() => {
     ctx.world.controller.lock = progress > 0;
+    return () => {
+      ctx.world.controller.lock = false;
+      ctx.world.controller.disable = false;
+    };
   }, [ctx.world, progress]);
 
   const step = useCallback(() => {
@@ -840,6 +862,28 @@ function useKeyboard(callback: (exp: string) => void) {
       188: "u", 37: "U", 38: "R", 39: "U'", 40: "R'",
     };
     const keydown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (
+        (target &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.tagName === "SELECT" ||
+            target.isContentEditable ||
+            target.closest(".chat-panel") ||
+            target.closest(".chat-settings-modal") ||
+            target.closest(".model-picker-modal"))) ||
+        (activeEl &&
+          (activeEl.tagName === "INPUT" ||
+            activeEl.tagName === "TEXTAREA" ||
+            activeEl.tagName === "SELECT" ||
+            activeEl.isContentEditable ||
+            activeEl.closest(".chat-panel") ||
+            activeEl.closest(".chat-settings-modal") ||
+            activeEl.closest(".model-picker-modal")))
+      ) {
+        return;
+      }
       const id = event.keyCode || event.which;
       if (id === 51 || id === 55) {
         width = Math.max(2, width - 1);
@@ -906,8 +950,6 @@ function Playground({ ctx: externalCtx, embedded = false }: { ctx?: AppContext; 
   const ctx = externalCtx || localCtx;
   const data = useMemo(() => new PlaygroundData(), []);
   const [, force] = useState(0);
-  const [scrambleOpen, setScrambleOpen] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [link, setLink] = useState("");
   const [done, setDone] = useState(false);
@@ -915,26 +957,50 @@ function Playground({ ctx: externalCtx, embedded = false }: { ctx?: AppContext; 
   const sync = useCallback(() => {
     data.scene = ctx.world.cube.history.init;
     data.history = ctx.world.cube.history.exp.substring(1);
+    // 计时中：根据魔方是否复原更新完成态；未开始计时时也允许首次拧动后进入计时
     if (!data.complete) {
       data.complete = ctx.world.cube.complete;
       if (data.complete) setDone(true);
+    } else if (ctx.world.cube.history.moves > 0 && !ctx.world.cube.complete) {
+      // 从「已复原待命」拧出第一步后，进入计时态
+      data.complete = false;
+      if (data.start === 0) data.start = Date.now();
+      data.now = Date.now();
     }
     data.save();
     force((i) => i + 1);
   }, [ctx.world, data]);
 
   const scramble = useCallback(() => {
+    ctx.world.controller.lock = false;
+    ctx.world.controller.disable = false;
     data.complete = true;
-    if (data.scrambler === "*") ctx.world.cube.twister.twist(new TwistAction("*"), true, true);
-    else ctx.world.cube.twister.setup(data.scrambler);
+    ctx.world.cube.twister.finish();
+    ctx.world.cube.reset();
+    ctx.world.cube.strip({});
+    ctx.world.cube.history.clear();
+    ctx.world.cube.twister.twist(new TwistAction("*"), true, true);
     data.complete = ctx.world.cube.complete;
     data.start = 0;
     data.now = 0;
     sync();
   }, [ctx.world, data, sync]);
 
+  const resetTimer = useCallback(() => {
+    data.start = 0;
+    data.now = 0;
+    ctx.world.cube.history.clear();
+    ctx.world.cube.twister.clearRedo();
+    // 清空步数后若仍是打乱态，继续允许计时
+    data.complete = ctx.world.cube.complete;
+    sync();
+  }, [ctx.world, data, sync]);
+
   const load = useCallback(() => {
-    // 每次进入计时训练都从复原状态开始，避免沿用教学台或上次训练的打乱
+    ctx.world.controller.lock = false;
+    ctx.world.controller.disable = false;
+    ctx.world.controller.taps = [];
+    // 每次进入计时训练：重置为已复原初始态（需手动点「打乱」后再计时）
     ctx.world.order = data.order || 3;
     ctx.world.cube.twister.finish();
     ctx.world.cube.reset();
@@ -952,6 +1018,17 @@ function Playground({ ctx: externalCtx, embedded = false }: { ctx?: AppContext; 
   }, [ctx.world, data]);
 
   useEffect(load, [load]);
+
+  // 进入计时训练时解锁交互，避免从播放器/公式页残留 lock/disable
+  useEffect(() => {
+    ctx.world.controller.lock = false;
+    ctx.world.controller.disable = false;
+    return () => {
+      ctx.world.controller.lock = false;
+      ctx.world.controller.disable = false;
+    };
+  }, [ctx.world]);
+
   useEffect(() => {
     ctx.world.callbacks.push(sync);
     return () => {
@@ -960,13 +1037,7 @@ function Playground({ ctx: externalCtx, embedded = false }: { ctx?: AppContext; 
   }, [ctx.world, sync]);
 
   useAnimation(() => {
-    if (ctx.world.order < 10) {
-      const tick = Math.sin((Date.now() / 2000) * Math.PI);
-      ctx.world.cube.position.y = (tick * Cubelet.SIZE) / 64;
-      ctx.world.cube.rotation.y = (tick / 768) * Math.PI;
-      ctx.world.cube.dirty = true;
-      ctx.world.cube.updateMatrix();
-    }
+    // 计时训练不做呼吸动画，避免位移干扰层扭选取
     if (!data.complete) {
       if (ctx.world.cube.history.moves === 0) {
         data.start = 0;
@@ -1003,29 +1074,40 @@ function Playground({ ctx: externalCtx, embedded = false }: { ctx?: AppContext; 
         scramble();
       }}
     >
-      <div className="score-pill">{formatScore(data.start, data.now, ctx.world.cube.history.moves)}</div>
       {prefix && <div className="key-pill">{prefix}</div>}
       <div className="bottom-panel">
-        <div className="toolbar primary-toolbar">
-          <IconButton title="重新打乱" onClick={() => setScrambleOpen(true)}><Shuffle /></IconButton>
-          <IconButton title="历史" onClick={() => setHistoryOpen(true)}><History /></IconButton>
-          <IconButton title="撤销" disabled={ctx.world.cube.history.length === 0} onClick={() => ctx.world.cube.twister.undo()}><RotateCcw /></IconButton>
-          <IconButton title="分享" onClick={share}><Share2 /></IconButton>
+        <div className="toolbar primary-toolbar playground-toolbar">
+          <div className="score-pill-inline clickable" title="点击重置计时与步数" onClick={resetTimer}>
+            <Timer size={15} style={{ opacity: 0.75, marginRight: 6 }} />
+            <span>{formatScore(data.start, data.now, ctx.world.cube.history.moves)}</span>
+          </div>
+          <div className="toolbar-actions">
+            <IconButton
+              title="上一步"
+              disabled={ctx.world.cube.history.length === 0}
+              onClick={() => {
+                ctx.world.cube.twister.undo();
+                sync();
+              }}
+            >
+              <RotateCcw />
+            </IconButton>
+            <IconButton
+              title="下一步"
+              disabled={!ctx.world.cube.twister.canRedo}
+              onClick={() => {
+                ctx.world.cube.twister.redo();
+                sync();
+              }}
+            >
+              <RotateCw />
+            </IconButton>
+            <IconButton title="随机打乱" onClick={scramble}><Shuffle /></IconButton>
+            <IconButton title="分享" onClick={share}><Share2 /></IconButton>
+          </div>
+          <div className="playground-toolbar-placeholder" />
         </div>
       </div>
-      <Modal title="重新打乱" open={scrambleOpen} onClose={() => setScrambleOpen(false)}>
-        <textarea value={data.scrambler} onChange={(e) => { data.scrambler = e.target.value; force((i) => i + 1); }} />
-        <div className="modal-actions"><button onClick={() => setScrambleOpen(false)}>取消</button><button className="danger" onClick={() => { setScrambleOpen(false); scramble(); }}>确定</button></div>
-      </Modal>
-      <Modal title="历史记录" open={historyOpen} onClose={() => setHistoryOpen(false)}>
-        <label>打乱<textarea readOnly value={data.scene} /></label>
-        <label>复原<textarea readOnly value={data.history} /></label>
-        <div className="modal-actions">
-          <button disabled={ctx.world.order > 3} onClick={() => { data.history = Rubic.adjust(data.history); data.save(); load(); }}>整理</button>
-          <button disabled={ctx.world.order > 3} onClick={() => { const ret = Rubic.niss(data.scene, data.history); data.scene = ret.scene; data.history = ret.history; data.save(); load(); }}>NISS</button>
-          <button onClick={share}>分享</button>
-        </div>
-      </Modal>
       <Modal title="分享链接" open={shareOpen} onClose={() => setShareOpen(false)}>
         <textarea readOnly value={link} />
         <div className="modal-actions"><button onClick={() => navigator.clipboard?.writeText(link)}>复制</button><button onClick={() => window.open(link)}>打开</button></div>
@@ -1539,7 +1621,7 @@ function ScannerPanel({
   const suggestedFace = target ?? (liveGrid.length === 9 ? identifyFace(liveGrid) : "U");
 
   return (
-    <Modal title="魔方状态录入" open={open} onClose={onClose} className="scanner-modal">
+    <Modal title="魔方状态录入" open={open} onClose={onClose} className="scanner-modal" backdropClassName="scanner-backdrop">
       <video ref={videoRef} className="scanner-video-hidden" playsInline muted />
       {error && <div className="scanner-error">{error}</div>}
       {phase === "intro" && (
@@ -1884,10 +1966,17 @@ function SolutionPlayer({
 }) {
   const [progress, setProgress] = useState(0);
   const [playing, setPlaying] = useState(false);
+  // 播放速度 1–10（越大越快），映射到动画帧数（帧数越小越快）
+  const [playSpeed, setPlaySpeed] = useState(() => {
+    const frames = ctx.preferance.frames || 20;
+    return Math.max(1, Math.min(10, Math.round(11 - (frames - 4) / 6.2)));
+  });
   const actions = useMemo(() => new TwistNode(result.raw).parse(), [result.raw]);
   const playingRef = useRef(false);
   const progressRef = useRef(0);
   const actionsRef = useRef(actions);
+  const stepsScrollRef = useRef<HTMLDivElement>(null);
+  const currentStepRef = useRef<HTMLSpanElement>(null);
   playingRef.current = playing;
   progressRef.current = progress;
   actionsRef.current = actions;
@@ -1942,6 +2031,10 @@ function SolutionPlayer({
   useEffect(() => {
     ctx.world.controller.disable = playing;
     ctx.world.controller.lock = progress > 0;
+    return () => {
+      ctx.world.controller.lock = false;
+      ctx.world.controller.disable = false;
+    };
   }, [ctx.world, playing, progress]);
 
   const step = useCallback(() => {
@@ -1992,6 +2085,17 @@ function SolutionPlayer({
   const currentPhaseIdx = nextStep ? nextStep.phase : result.phases.length - 1;
   const atEnd = progress >= total;
 
+  useEffect(() => {
+    const chip = currentStepRef.current;
+    const box = stepsScrollRef.current;
+    if (!chip || !box) return;
+    const chipRect = chip.getBoundingClientRect();
+    const boxRect = box.getBoundingClientRect();
+    if (chipRect.top < boxRect.top + 2 || chipRect.bottom > boxRect.bottom - 2) {
+      chip.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    }
+  }, [progress]);
+
   return (
     <div className="bottom-panel tall solution-player">
       <div className="solution-topbar">
@@ -2027,10 +2131,11 @@ function SolutionPlayer({
         </span>
       </div>
 
-      <div className="solution-string">
+      <div className="solution-string" ref={stepsScrollRef}>
         {result.steps.map((s, i) => (
           <span
             key={i}
+            ref={i === Math.min(progress, Math.max(0, total - 1)) ? currentStepRef : undefined}
             className={`step-chip ${i < progress ? "done" : ""} ${i === progress ? "current" : ""}`}
           >
             {s.exp}
@@ -2052,7 +2157,7 @@ function SolutionPlayer({
             setProgress(value);
           }}
         />
-        <div className="toolbar">
+        <div className="toolbar solution-controls">
           <IconButton title="回到开始" disabled={progress === 0} onClick={init}>
             <SkipBack />
           </IconButton>
@@ -2068,10 +2173,92 @@ function SolutionPlayer({
           <IconButton title="跳到结尾" disabled={atEnd} onClick={finish}>
             <SkipForward />
           </IconButton>
+          <div className="solution-speed-inline" title="播放速度">
+            <span>速度</span>
+            <input
+              type="range"
+              min={1}
+              max={10}
+              step={1}
+              value={playSpeed}
+              onChange={(e) => {
+                const speed = Number(e.target.value);
+                setPlaySpeed(speed);
+                const frames = Math.round(60 - (speed - 1) * (56 / 9));
+                ctx.preferance.frames = Math.max(4, Math.min(60, frames));
+                ctx.preferance.save();
+              }}
+            />
+            <b>{playSpeed}x</b>
+          </div>
         </div>
       </div>
     </div>
   );
+}
+
+function convertBackendSolution(
+  data: { method?: string; steps?: Array<{ move: string; stage: string; narration_key?: string }> },
+  method: SolveMethod
+): SolveResult {
+  const methodKey = (data.method || method).toLowerCase();
+  const backendSteps = data.steps || [];
+  const rawMoves = backendSteps.map((s) => s.move).join(" ");
+  const isCfop = methodKey === "cfop";
+  const isKociemba = methodKey === "kociemba";
+  const phaseList = isCfop
+    ? ["cross", "f2l", "oll", "pll"]
+    : isKociemba
+      ? ["kociemba"]
+      : [
+          "cross",
+          "first_layer_corners",
+          "second_layer",
+          "last_layer_cross",
+          "last_layer_corners_orient",
+          "last_layer_corners_perm",
+          "last_layer_edges",
+        ];
+  const phaseLabels = isCfop
+    ? ["1. Cross 底层十字", "2. F2L 前两层", "3. OLL 顶层朝向", "4. PLL 顶层排列"]
+    : isKociemba
+      ? ["两阶段最优求解"]
+      : [
+          "1. 底层十字",
+          "2. 底层角块",
+          "3. 中层棱块",
+          "4. 顶层十字",
+          "5. 顶层角定向",
+          "6. 顶层角位置",
+          "7. 顶层棱位置",
+        ];
+  const phases: SolvePhaseInfo[] = phaseLabels.map((label, idx) => ({
+    index: idx,
+    label,
+    startStep: -1,
+    endStep: 0,
+  }));
+  const steps: SolveStep[] = [];
+  backendSteps.forEach((s, idx) => {
+    let pIdx = phaseList.indexOf(s.stage);
+    if (pIdx === -1) pIdx = 0;
+    const pLabel = phaseLabels[pIdx] || s.stage;
+    steps.push({
+      exp: s.move,
+      moveIndex: idx,
+      phase: pIdx,
+      phaseLabel: pLabel,
+    });
+    if (phases[pIdx].startStep === -1) phases[pIdx].startStep = idx;
+    phases[pIdx].endStep = idx + 1;
+  });
+  phases.forEach((p) => {
+    if (p.startStep === -1) {
+      p.startStep = 0;
+      p.endStep = 0;
+    }
+  });
+  return { method, raw: rawMoves, steps, phases };
 }
 
 function Helper({
@@ -2088,7 +2275,7 @@ function Helper({
   const localCtx = useAppContext();
   const ctx = externalCtx || localCtx;
   const solver = useMemo(() => new Solver(), []);
-  const [stickers, setStickers] = useState<StickerMap>(() => JSON.parse(localStorage.getItem("helper-stickers") || "{}"));
+  const [stickers, setStickers] = useState<StickerMap>({});
   const [methodOpen, setMethodOpen] = useState(false);
   const [result, setResult] = useState<SolveResult | null>(null);
   const [resultScene, setResultScene] = useState("");
@@ -2108,6 +2295,16 @@ function Helper({
     setStickers(next);
     localStorage.setItem("helper-stickers", JSON.stringify(next));
   }, []);
+  const buildSolvedStickers = useCallback((): StickerMap => {
+    const next: StickerMap = {};
+    for (const face of [FACE.L, FACE.R, FACE.D, FACE.U, FACE.B, FACE.F]) {
+      const key = FACE[face];
+      const group = ctx.world.cube.table.face(key);
+      next[key] = {};
+      for (const index of group.indices) next[key]![index] = key;
+    }
+    return next;
+  }, [ctx.world]);
   const captureStickersFromCube = useCallback(() => {
     const facelets = ctx.world.cube.serialize();
     ctx.world.cube.twister.finish();
@@ -2131,30 +2328,29 @@ function Helper({
     persistStickers(next);
     ctx.world.dirty = true;
   }, [ctx.world, persistStickers]);
-  // 进入教学台时把本地贴纸恢复到共享魔方（录入/还原之间保持同一状态）
+  // 进入教学台：默认还原态，不恢复上次打乱/贴纸
   useEffect(() => {
     ctx.world.order = 3;
     ctx.world.cube.twister.finish();
     ctx.world.cube.reset();
     ctx.world.cube.strip({});
     ctx.world.cube.history.clear();
-    applyStickers(stickers);
-    // 仅在挂载时恢复
+    ctx.world.cube.history.init = "";
+    const solved = buildSolvedStickers();
+    persistStickers(solved);
+    applyStickers(solved);
+    setResult(null);
+    setResultScene("");
+    setErrorText("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [applyStickers, ctx.world]);
+  }, [applyStickers, buildSolvedStickers, ctx.world, persistStickers]);
   useAnimation(() => solver.init());
   const reset = () => {
     ctx.world.cube.twister.finish();
     ctx.world.cube.reset();
     ctx.world.cube.strip({});
     ctx.world.cube.history.clear();
-    const next: StickerMap = {};
-    for (const face of [FACE.L, FACE.R, FACE.D, FACE.U, FACE.B, FACE.F]) {
-      const key = FACE[face];
-      const group = ctx.world.cube.table.face(key);
-      next[key] = {};
-      for (const index of group.indices) next[key]![index] = key;
-    }
+    const next = buildSolvedStickers();
     persistStickers(next);
     ctx.world.dirty = true;
   };
@@ -2175,17 +2371,68 @@ function Helper({
     ctx.world.cube.twister.twist(new TwistAction("*"), true, true);
     captureStickersFromCube();
   };
-  const runSolve = (method: SolveMethod) => {
-    const ret = solver.solvePhased(ctx.world.cube.serialize(), method);
+  const runSolve = async (method: SolveMethod) => {
+    const currentState = ctx.world.cube.serialize();
+    const solvedFacelets = "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB";
     setMethodOpen(false);
-    if (ret.error) {
-      setErrorText(ret.error);
-      setResult(null);
-      return;
-    }
     setErrorText("");
-    setResultScene(ctx.world.cube.history.exp);
-    setResult(ret);
+
+    const applyResult = (ret: SolveResult) => {
+      if (ret.error) {
+        setErrorText(ret.error);
+        setResult(null);
+        return;
+      }
+      if (ret.steps.length === 0 && currentState !== solvedFacelets) {
+        setErrorText("未返回有效还原步骤，请检查魔方贴纸颜色是否完整合法。");
+        setResult(null);
+        return;
+      }
+      const hasStickers = Object.values(stickers).some((face) => face && Object.keys(face).length > 0);
+      const sceneToPlay =
+        ctx.world.cube.history.init ||
+        ctx.world.cube.history.exp ||
+        (hasStickers ? "" : ret.raw ? `(${ret.raw})'` : "");
+      setErrorText("");
+      setResultScene(sceneToPlay);
+      setResult(ret);
+    };
+
+    const fallbackLocal = () => {
+      const fallback = solver.solvePhased(currentState, method);
+      applyResult(fallback);
+    };
+
+    try {
+      const controller = new AbortController();
+      // Kociemba 首次生成查找表可能阻塞后端；超时后回退到前端离线求解，保证能出还原过程
+      const timeoutMs = method === "kociemba" ? 12000 : 8000;
+      const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+      let resp: Response;
+      try {
+        resp = await fetch("/api/solve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            method,
+            facelets: currentState,
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        window.clearTimeout(timer);
+      }
+      if (!resp.ok) {
+        const errJson = await resp.json().catch(() => ({}));
+        const detail = (errJson as { detail?: string }).detail || `后端求解错误 (${resp.status})`;
+        throw new Error(detail);
+      }
+      const data = await resp.json();
+      applyResult(convertBackendSolution(data, method));
+    } catch (err: unknown) {
+      console.warn("后端求解失败，回退前端求解器:", err);
+      fallbackLocal();
+    }
   };
   const exitPlayer = () => {
     // 退出播放：恢复录入态（重置动作历史，回到求解前的贴纸状态）
@@ -2317,7 +2564,6 @@ function Algs({
   const data = useMemo(() => algsJson as { name: string; strip: { [face: string]: number[] | undefined }; items: { name: string; origin: string; exp?: string; order?: number; scramble?: boolean }[] }[], []);
   const [group, setGroup] = useState(0);
   const [index, setIndex] = useState(0);
-  const [list, setList] = useState(false);
   const [action, setAction] = useState("");
   const current = data[group].items[index];
   useEffect(() => {
@@ -2330,7 +2576,32 @@ function Algs({
   }, [ctx.world, current, data, group, ready]);
   return (
     <SceneShell ctx={ctx} mode="guide" viewportHeight={158} lockOrder embedded={embedded}>
-      <button className="score-pill clickable" onClick={() => setList(true)}><BookOpen />{current.name}</button>
+      <aside className="legend-panel alg-side-panel">
+        <header>
+          <strong>
+            <BookOpen />
+            公式库
+          </strong>
+        </header>
+        <p className="legend-hint">当前：{current.name} — 点击条目切换公式，下方可播放与编辑。</p>
+        <div className="alg-layout alg-side-layout">
+          <div className="settings-tabs compact alg-side-tabs">
+            {data.map((item, i) => (
+              <button key={item.name} className={group === i ? "selected" : ""} onClick={() => { setGroup(i); setIndex(0); }}>
+                {item.name}
+              </button>
+            ))}
+          </div>
+          <div className="alg-grid alg-side-grid">
+            {data[group].items.map((item, i) => (
+              <button key={item.name} className={index === i ? "selected" : ""} onClick={() => setIndex(i)}>
+                <strong>{item.name}</strong>
+                <span>{(item.exp || item.origin).slice(0, 70)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </aside>
       <div className="bottom-panel medium">
         <div className="script-row">
           <input value={action} onChange={(e) => setAction(e.target.value)} />
@@ -2338,21 +2609,6 @@ function Algs({
         </div>
         <Playbar ctx={ctx} scene={`x2${current.scramble ? "" : "^"}`} action={action} />
       </div>
-      <Modal title="公式库" open={list} onClose={() => setList(false)} className="alg-modal">
-        <div className="alg-layout">
-          <div className="settings-tabs compact">
-            {data.map((item, i) => <button key={item.name} className={group === i ? "selected" : ""} onClick={() => setGroup(i)}>{item.name}</button>)}
-          </div>
-          <div className="alg-grid">
-            {data[group].items.map((item, i) => (
-              <button key={item.name} onClick={() => { setIndex(i); setList(false); }}>
-                <strong>{item.name}</strong>
-                <span>{(item.exp || item.origin).slice(0, 70)}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      </Modal>
     </SceneShell>
   );
 }
@@ -2498,31 +2754,24 @@ function Director({ ctx: externalCtx, embedded = false }: { ctx?: AppContext; em
 }
 
 function HelpContent({ compact = false }: { compact?: boolean }) {
-  const keyRows = [
-    ["1", "2", "3=<", "4=>", "5=M", "6=M", "7=<", "8=>", "9", "0"],
-    ["Q=z'", "W=B", "E=L'", "R=Lw'", "T=x", "Y=x", "U=Rw", "I=R", "O=B'", "P=z"],
-    ["A=y'", "S=D", "D=L", "F=U'", "G=F'", "H=F", "J=U", "K=R'", "L=D'", ";=y"],
-    ["Z=Dw", "X=M'", "C=Uw'", "V=Lw", "B=x'", "N=x'", "M=Rw'", ",=Uw", ".=M'", "/=Dw'"],
-    ["←=U", "↑=R", "→=U'", "↓=R'"],
-  ];
   const quickStarts = [
-    ["练习复原", "进入练习，点重新打乱；拖动贴纸转层，拖空白区域转视角；完成后可看历史或分享复盘。"],
-    ["录入求解", "进入求解，先选颜色，再点魔方贴纸填色；颜色数量正确后点求解，可复制公式或直接播放。"],
-    ["学习公式", "进入公式，选择 F2L / OLL / PLL 条目；用播放器逐步观察，必要时直接编辑公式文本。"],
-    ["制作动画", "进入动画，编辑脚本，播放预览；需要素材时可截图、导出 GIF 或 PNG 序列。"],
+    ["AI 智能伴学", "右侧「魔方助手」接入 MCP 协议，随时点击「新手教学」、「CFOP速拧」或「下一步怎么做」，获取结构化动作与语音指导。"],
+    ["练习与计时", "3D 拟真舞台自由转动，支持鼠标拖拽旋转。点击左下角时钟可清零重置，打乱转动第 1 步自动起步计时。"],
+    ["录入与求解", "在求解模式中填涂真实魔方贴纸颜色，后端求解引擎秒级计算还原路径，并可点击播放条跟随 3D 动画复盘。"],
+    ["公式与动画", "在公式模式中按分类学习 F2L/OLL/PLL；在动画模式中编辑动作脚本，一键导出 GIF 动图或 PNG 序列。"],
   ];
   const modes = [
-    ["练习", "自由操作魔方", "适合计时、打乱、复原、撤销、查看历史和分享复盘。"],
-    ["求解", "三阶颜色录入", "适合把真实魔方状态录入到页面中，生成复原公式并播放检查。"],
-    ["公式", "内置公式库", "适合按分类学习 F2L、OLL、PLL，逐步观察公式如何移动块。"],
-    ["动画", "脚本与导出", "适合制作演示、教程素材、GIF 动画、透明 PNG 序列和分享播放链接。"],
-    ["播放", "只读复盘", "由分享链接或求解结果打开，专注播放场景和动作，不改动原始脚本。"],
+    ["练习", "3D 拟真舞台与计时复盘", "自由操作魔方、毫秒级计时、打乱还原、历史记录及 AI 实时伴学。"],
+    ["求解", "实体魔方颜色录入与求解", "录入真实魔方 54 格颜色，由 MCP 求解引擎秒级计算还原步骤并生成分步动画。"],
+    ["公式", "全套 CFOP 标准公式库", "涵盖 F2L、OLL、PLL 经典公式，支持逐步拆解播放与自定义编辑验证。"],
+    ["动画", "魔方动作脚本与动画制作", "支持自定义场景与动作脚本编写，可导出高清 PNG 序列或 GIF 教学动图。"],
+    ["播放", "复原路径推演播放器", "跟随 3D 动画与语音解法，按阶段和步骤逐格观察魔方旋转变化。"],
   ];
   return (
     <section className={compact ? "help compact-help" : "help-page"}>
-      <h1>Cuber 使用帮助</h1>
+      <h1>CubeTutor 使用帮助</h1>
       <p className="help-lead">
-        Cuber 是一个在浏览器中运行的魔方工具箱。它既可以当作自由练习的虚拟魔方，也能用于三阶求解、公式学习、动画制作、复盘播放和外观配置。
+        CubeTutor 是一个基于 <strong>MCP（Model Context Protocol）协议</strong> 与 3D 拟真舞台的智能魔方教学与求解系统。系统深度融合了 Emotion Ball 灵动 AI 伴学导师、多算法核心求解引擎（新手层先法 / CFOP 进阶速拧 / Kociemba 最优解）、3D 动画推演与语音教学。
       </p>
 
       <h2>快速开始</h2>
@@ -2548,80 +2797,48 @@ function HelpContent({ compact = false }: { compact?: boolean }) {
         ))}
       </div>
 
-      <h2>基础操作</h2>
+      <h2>AI 智能助手与求解体系</h2>
       <ul>
-        <li>在魔方贴纸上拖动可以转动对应层，在空白区域拖动可以旋转整体视角。</li>
-        <li>滚轮可以缩放视图；控制台的“镜头”页可以精确调整缩放、透视、水平角和俯仰角。</li>
-        <li>练习模式底部工具栏包含重新打乱、历史、撤销和分享。历史会保存初始场景和你的后续转动。</li>
-        <li>历史记录会保存当前初始状态和后续转动，复盘会打开独立播放模式，便于逐步查看还原过程。</li>
-        <li>重新打乱框中输入 <code>*</code> 会生成随机打乱；也可以输入指定公式作为打乱状态。</li>
+        <li><strong>新手层先法（LBL · 7 阶段）</strong>：专为初学者打造，按“底十字 ➔ 底角块 ➔ 中层棱 ➔ 顶十字 ➔ 顶角向 ➔ 顶角位 ➔ 顶棱位”分步推进，易学易懂。</li>
+        <li><strong>CFOP 进阶速拧（4 阶段）</strong>：竞技速拧主流方案，按“Cross 底十字 ➔ F2L 前两层 ➔ OLL 顶面朝向 ➔ PLL 顶层置换”快速还原。</li>
+        <li><strong>Kociemba 最优解</strong>：采用两阶段数学算法，20 步以内极速计算理论最优还原路径。</li>
+        <li><strong>大模型 API 配置</strong>：点击右侧面板顶部「⚙️ 设置」可配置 DeepSeek、通义千问、OpenRouter、OpenAI 等大模型服务，获得更具深度的答疑。</li>
       </ul>
 
-      <h2>键盘操作</h2>
-      <p>物理键盘会映射为常用转动，适合快速练习和公式输入。页面左上角会显示正在输入的数字前缀。</p>
-      <div className="key-table">
-        {keyRows.map((row, rowIndex) => (
-          <div key={rowIndex} className="key-row">
-            {row.map((item) => {
-              const [key, action = ""] = item.split("=");
-              return (
-                <span key={item}>
-                  <b>{key}</b>
-                  <small>{action}</small>
-                </span>
-              );
-            })}
-          </div>
-        ))}
-      </div>
+      <h2>3D 舞台与基础操作</h2>
+      <ul>
+        <li>在魔方贴纸上拖动可以转动对应层，在空白区域拖动可以旋转整体 3D 视角。</li>
+        <li>鼠标滚轮可缩放视图；控制台的“镜头”页可以精确调整缩放、透视、水平角和俯仰角。</li>
+        <li>练习模式底部工具栏包含计时重置、随机打乱、上一步、下一步和分享功能。</li>
+        <li>点击左下角 <code>⏱️ 00:00.0/0</code> 计时卡片可一键重置当前用时与步数。</li>
+        <li>随机打乱会立刻生成新打乱，无需弹窗确认。</li>
+      </ul>
 
-      <h2>求解模式</h2>
+      <h2>求解与录入模式</h2>
       <ul>
         <li>先在底部选择颜色，再点击魔方上的贴纸录入颜色。三阶魔方每种颜色应各出现 9 次。</li>
-        <li>“重置”会恢复一个标准已还原状态；“清空”会移除所有贴纸颜色，适合重新录入。</li>
-        <li>求解结果可以复制，也可以直接打开播放模式逐步检查。若返回错误，优先检查中心、棱块和角块颜色是否录入正确。</li>
+        <li>“重置”会恢复标准已还原状态；“清空”会移除所有贴纸颜色，适合重新录入。</li>
+        <li>求解完成后可直接打开播放器逐步跟随 3D 动画与语音解法复盘。若校验未通过，系统会自动提示不合法的具体原因。</li>
       </ul>
 
-      <h2>公式与播放</h2>
+      <h2>公式与动画制作</h2>
       <ul>
-        <li>公式模式内置 F2L、OLL、PLL。点击左上角公式名称可打开列表并切换条目。</li>
-        <li>播放条支持回到开始、上一步、播放/暂停、下一步、跳到结尾；进度滑块可以直接拖到任意步骤。</li>
-        <li>公式输入框可以临时编辑。恢复按钮会把当前条目还原为内置公式。</li>
-        <li>播放模式通常由分享链接、求解结果或动画分享打开，适合只读复盘和逐步讲解。</li>
+        <li>公式模式内置完整 F2L、OLL、PLL 公式库，支持按条目逐步拆解观察。</li>
+        <li>动画模式支持自定义场景和动作脚本，可一键导出高清透明 PNG 序列或 GIF 动图。</li>
+        <li>基础转动语法：<code>R U F D L B</code>；整体转动：<code>x y z</code>；宽层转动：<code>Rw Uw</code>；后缀 <code>'</code> 表示逆时针，数字表示旋转次数（如 <code>U2</code>）。</li>
       </ul>
 
-      <h2>动画制作</h2>
+      <h2>控制台与个性化</h2>
       <ul>
-        <li>“脚本”里有两个字段：场景用于布置初始状态，动作定义后续播放内容。</li>
-        <li>“展开”会把组合公式解析成逐步动作，便于检查和导出。</li>
-        <li>“截图”导出当前画面；“导出动画”可生成 GIF 或 PNG 序列；“分享”会复制可播放链接。</li>
-        <li>输出设置可调整画布像素、导出格式和 GIF 帧延迟。PNG 序列适合继续放进剪辑或设计软件处理。</li>
-      </ul>
-
-      <h2>脚本语法</h2>
-      <ul>
-        <li>基础转动：<code>R U F D L B</code>；整体转动：<code>x y z</code>；宽层转动：<code>Rw Uw</code>。</li>
-        <li>后缀 <code>'</code> 表示逆时针，数字表示重复次数，例如 <code>R'</code>、<code>U2</code>、<code>Rw2</code>。</li>
-        <li>括号可以组合并重复，例如 <code>(R U R' U')2</code>。</li>
-        <li>方括号支持交换子和共轭写法，例如 <code>[A,B]</code>、<code>[A:B]</code>。</li>
-        <li><code>^</code> 会把前面的逆操作写入场景，常用于把动画起始状态先摆好；<code>~</code> 表示停顿，<code>;</code> 表示快速分隔，<code>#</code> 表示复位，<code>*</code> 表示随机打乱。</li>
-        <li><code>SSE:</code> 前缀可输入 SSE 表达式，动画模式会在播放和展开时转换为标准动作。</li>
-        <li><code>//</code> 可以添加行注释，注释内容不会被解析成动作。</li>
-      </ul>
-
-      <h2>控制台设置</h2>
-      <ul>
-        <li>第一排是模式切换，决定当前工作流；第二排是当前应用的设置页签。</li>
-        <li>阶数支持 2 到 10 阶。求解和部分公式场景会锁定阶数，以保证算法和贴纸状态有效。</li>
-        <li>镜头页调整缩放、透视和视角；控制页调整动画帧数和触控灵敏度。</li>
-        <li>显示页切换厚贴纸、镜面、空心、箭头、光影和深色界面；配色页可修改六面颜色及辅助颜色。</li>
-        <li>右侧重置按钮会打开重置确认。可以只重置配置，也可以清空本地数据并刷新页面。</li>
+        <li>阶数支持 2 到 10 阶自由调节（求解模式锁定为 3 阶以匹配算法约束）。</li>
+        <li>显示页支持厚贴纸、镜面、空心、箭头、光影和深色界面自由切换。</li>
+        <li>配色页可自定义六面颜色及辅助高亮颜色，满足个性化视觉需求。</li>
       </ul>
 
       <h2>数据与分享</h2>
       <ul>
         <li>练习数据、偏好设置和配色保存在浏览器本地存储中，不需要账号。</li>
-        <li>分享链接会把阶数、场景、动作和必要贴纸状态编码到 URL 中。接收者打开后可直接复盘。</li>
+        <li>分享链接会把阶数、场景、动作和必要贴纸状态编码到 URL 中，接收者打开后可直接复盘。</li>
         <li>如果页面表现异常，可以先尝试控制台重置配置；需要彻底恢复时再选择清空全部本地数据。</li>
       </ul>
     </section>
@@ -2921,13 +3138,15 @@ function App() {
   const [route, setRoute] = useState<AppRoute>(() => readRoute());
   const [teachHasResult, setTeachHasResult] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatWidth, setChatWidth] = useState(420);
   const ctx = useAppContext();
   const viewport = useRef<ViewportHandle>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const { width, height } = useWindowSize();
   const isHome = route.mode === "home";
   const isDocument = route.mode === "help";
-  const isAtlas = route.mode === "guide" && route.guideTab === "legend";
+  const isGuideSide = route.mode === "guide";
   const panelHeight = panelHeightFor(route, { teachHasResult });
 
   const navigate = useCallback<NavigateFn>((partial) => {
@@ -2977,21 +3196,28 @@ function App() {
       // 教学台 / 计时训练 / 设置：进入时统一硬重置，避免其它模块污染
       if (mode === "teach" || mode === "train" || mode === "settings") {
         if (mode === "teach") ctx.world.order = 3;
+        ctx.world.controller.lock = false;
+        ctx.world.controller.disable = false;
+        ctx.world.controller.taps = [];
         ctx.world.cube.twister.finish();
         ctx.world.cube.reset();
         ctx.world.cube.strip({});
         ctx.world.cube.history.clear();
         ctx.world.cube.history.init = "";
+        ctx.world.cube.position.set(0, 0, 0);
+        ctx.world.cube.rotation.set(0, 0, 0);
+        ctx.world.cube.updateMatrix();
         if (mode === "teach") {
-          try {
-            const map = JSON.parse(localStorage.getItem("helper-stickers") || "{}") as StickerMap;
-            for (const face of [FACE.L, FACE.R, FACE.D, FACE.U, FACE.B, FACE.F]) {
-              const list = map[FACE[face]];
-              if (list) for (const sticker in list) ctx.world.cube.stick(Number(sticker), face, list[sticker]);
-            }
-          } catch {
-            /* ignore */
+          // 进入教学台统一回到已复原状态，不恢复上次贴纸
+          localStorage.removeItem("helper-stickers");
+          const next: StickerMap = {};
+          for (const face of [FACE.L, FACE.R, FACE.D, FACE.U, FACE.B, FACE.F]) {
+            const key = FACE[face];
+            const group = ctx.world.cube.table.face(key);
+            next[key] = {};
+            for (const index of group.indices) next[key]![index] = key;
           }
+          localStorage.setItem("helper-stickers", JSON.stringify(next));
         }
         ctx.world.dirty = true;
         void prev;
@@ -3089,7 +3315,14 @@ function App() {
       ro.disconnect();
       el.removeEventListener("transitionend", onTransitionEnd);
     };
-  }, [applyScopeReset, ctx, height, isAtlas, isDocument, isHome, panelHeight, route.mode, scopeKey, syncStageSize, width]);
+  }, [applyScopeReset, ctx, height, isDocument, isGuideSide, isHome, panelHeight, route.mode, scopeKey, syncStageSize, width]);
+
+  useEffect(() => {
+    if (isHome) {
+      setChatOpen(false);
+      setChatWidth(420);
+    }
+  }, [isHome]);
 
   const [heroMounted, setHeroMounted] = useState(isHome);
   const [heroVisible, setHeroVisible] = useState(isHome);
@@ -3111,15 +3344,61 @@ function App() {
     };
   }, [isHome]);
 
+  // 落地页：不规则随机拧面 idle
+  useEffect(() => {
+    if (!isHome || !heroVisible) return;
+    const faces = ["U", "D", "R", "L", "F", "B"];
+    const suffixes = ["", "'", "2"];
+    let lastFace = "";
+    let cancelled = false;
+    let timer = 0;
+    // 保持可交互：不禁用 controller；仅在空闲时自动拧面
+    ctx.world.controller.disable = false;
+    ctx.world.controller.lock = false;
+
+    const schedule = () => {
+      const delay = 700 + Math.random() * 1400;
+      timer = window.setTimeout(() => {
+        if (cancelled) return;
+        if (
+          !stageMovingRef.current &&
+          !ctx.world.controller.dragging &&
+          !ctx.world.controller.rotating &&
+          ctx.world.cube.twister.length === 0 &&
+          tweener.length === 0
+        ) {
+          let face = faces[Math.floor(Math.random() * faces.length)];
+          if (face === lastFace) {
+            face = faces[(faces.indexOf(face) + 1 + Math.floor(Math.random() * 5)) % faces.length];
+          }
+          lastFace = face;
+          const suf = suffixes[Math.floor(Math.random() * suffixes.length)];
+          ctx.world.cube.twister.push(face + suf);
+        }
+        schedule();
+      }, delay);
+    };
+    schedule();
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      ctx.world.cube.twister.finish();
+    };
+  }, [isHome, heroVisible, ctx]);
+
   useAnimation(() => {
     if (isDocument) return;
     if (poseLerpRef.current) {
       const done = tickPoseLerp(ctx, poseLerpRef.current);
       if (done) poseLerpRef.current = null;
     } else if (isHome && heroVisible && !stageMovingRef.current && ctx.world.order < 10) {
+      const twisting = ctx.world.cube.twister.length > 0 || tweener.length > 0;
       const tick = Math.sin((Date.now() / 2800) * Math.PI);
-      ctx.world.cube.rotation.y += 0.004;
-      ctx.world.cube.position.y = (tick * Cubelet.SIZE) / 72;
+      ctx.world.cube.rotation.y += twisting ? 0.0015 : 0.003;
+      if (!twisting) {
+        ctx.world.cube.position.y = (tick * Cubelet.SIZE) / 72;
+      }
       ctx.world.cube.dirty = true;
       ctx.world.cube.updateMatrix();
     } else if (!isHome && !stageMovingRef.current) {
@@ -3136,7 +3415,10 @@ function App() {
   }
 
   return (
-    <div className={`cuber-root ${isHome ? "layout-home" : "layout-app"}${isAtlas ? " guide-atlas" : ""}`}>
+    <div
+      className={`cuber-root ${isHome ? "layout-home" : "layout-app"}${isGuideSide ? " guide-atlas" : ""}${chatOpen ? " chat-open" : ""}`}
+      style={{ ["--chat-w" as string]: `${chatWidth}px` } as React.CSSProperties}
+    >
       <AppTopNav
         route={route}
         variant={isHome ? "home" : "app"}
@@ -3144,6 +3426,7 @@ function App() {
         onNavigate={(mode) => {
           if (mode === "guide") navigate({ mode, guideTab: "legend" });
           else if (mode === "settings") navigate({ mode, settingsTab: "appear" });
+          else if (mode === "teach") navigate({ mode, teachTab: "input" });
           else navigate({ mode });
         }}
         onOpenMenu={() => setMobileOpen(true)}
@@ -3151,9 +3434,7 @@ function App() {
 
       {mobileOpen && (
         <div className="cuber-mobile-menu">
-          <button type="button" className="cuber-logo" onClick={() => navigate({ mode: "home" })} aria-label="首页">
-            <span className="cuber-logo-dot" />
-          </button>
+          <BrandLogo onClick={() => navigate({ mode: "home" })} />
           <button type="button" className="cuber-mobile-close" onClick={() => setMobileOpen(false)} aria-label="关闭">
             <X />
           </button>
@@ -3165,6 +3446,7 @@ function App() {
                   onClick={() => {
                     if (item.mode === "guide") navigate({ mode: "guide", guideTab: "legend" });
                     else if (item.mode === "settings") navigate({ mode: "settings", settingsTab: "appear" });
+                    else if (item.mode === "teach") navigate({ mode: "teach", teachTab: "input" });
                     else navigate({ mode: item.mode });
                   }}
                 >
@@ -3194,6 +3476,7 @@ function App() {
             onNavigate={(mode) => {
               if (mode === "guide") navigate({ mode, guideTab: "legend" });
               else if (mode === "settings") navigate({ mode, settingsTab: "appear" });
+              else if (mode === "teach") navigate({ mode, teachTab: "input" });
               else navigate({ mode });
             }}
             onStart={() => navigate({ mode: "teach", teachTab: "input" })}
@@ -3208,6 +3491,8 @@ function App() {
               <SubTabBar
                 tabs={GUIDE_TABS}
                 value={route.guideTab}
+                alignTo="guide"
+                layoutKey={`${chatOpen}-${chatWidth}`}
                 onChange={(guideTab) => navigate({ mode: "guide", guideTab })}
               />
               {route.guideTab === "algs" ? <Algs ctx={ctx} embedded ready={cubeSettled} /> : <LegendPanel ctx={ctx} />}
@@ -3218,6 +3503,8 @@ function App() {
               <SubTabBar
                 tabs={TEACH_TABS}
                 value={route.teachTab}
+                alignTo="teach"
+                layoutKey={`${chatOpen}-${chatWidth}`}
                 onChange={(teachTab) => navigate({ mode: "teach", teachTab })}
               />
               <Helper ctx={ctx} embedded tab={route.teachTab} onResultChange={setTeachHasResult} />
@@ -3240,6 +3527,18 @@ function App() {
           )}
           {route.mode === "player" && <Player ctx={ctx} embedded />}
         </div>
+      )}
+
+      {isHome ? (
+        <HomeAgentPeek />
+      ) : (
+        <ChatPanel
+          open={chatOpen}
+          onToggle={setChatOpen}
+          onWidthChange={setChatWidth}
+          getCubeState={() => ctx.world.cube.serialize()}
+          isSolved={ctx.world.cube.complete}
+        />
       )}
     </div>
   );

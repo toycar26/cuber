@@ -4,3 +4,14 @@ node_modules/
 package-lock.json
 dist/
 vite-dev.log
+
+# Python backend
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.env
+server/.twophase_cache/
+server/solvers/kociemba/tables/*
+!server/solvers/kociemba/tables/README.md

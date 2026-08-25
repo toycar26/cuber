@@ -27,6 +27,8 @@
     "src/solver/**/*",
     "src/cv/**/*",
     "src/shell/**/*",
+    "src/components/**/*",
+    "src/avatar/**/*",
     "src/vue/Viewport/toucher.ts",
     "src/vue/Playground/rubic.ts",
     "src/vue/Algs/algs.json"

@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>落地页英文字体预览</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Anton&family=Archivo+Black&family=Barlow+Condensed:wght@500;700;800&family=Bebas+Neue&family=Chakra+Petch:wght@500;700&family=DM+Sans:ital,opsz,wght@0,9..40,500;0,9..40,700;1,9..40,500&family=DM+Serif+Display:ital@0;1&family=IBM+Plex+Sans:wght@500;700&family=Outfit:wght@500;700;800&family=Oswald:wght@500;700&family=Russo+One&family=Sora:wght@500;700;800&family=Space+Grotesk:wght@500;700&family=Syne:wght@600;700;800&family=Teko:wght@500;600;700&family=Unbounded:wght@500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #f3efe6;
+        --ink: #1a1612;
+        --muted: #6b6358;
+        --card: #fffdf8;
+        --line: #ddd4c6;
+        --accent: #5e0ed7;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 32px 20px 64px;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "IBM Plex Sans", system-ui, sans-serif;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 28px;
+      }
+      .lead {
+        margin: 0 0 28px;
+        color: var(--muted);
+        max-width: 720px;
+        line-height: 1.5;
+      }
+      .grid {
+        display: grid;
+        gap: 18px;
+        max-width: 1100px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 22px 24px 20px;
+      }
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 14px;
+        align-items: baseline;
+        margin-bottom: 14px;
+      }
+      .name {
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .tag {
+        font-size: 12px;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 2px 8px;
+      }
+      .use {
+        font-size: 12px;
+        color: var(--accent);
+        font-weight: 700;
+      }
+      .sample-title {
+        font-size: clamp(42px, 7vw, 72px);
+        line-height: 0.95;
+        letter-spacing: -0.02em;
+        margin: 0 0 14px;
+      }
+      .sample-title span {
+        display: block;
+      }
+      .sample-tagline {
+        font-size: clamp(20px, 3vw, 28px);
+        line-height: 1.2;
+        margin: 0 0 10px;
+        font-weight: 700;
+      }
+      .sample-desc {
+        font-size: 15px;
+        line-height: 1.55;
+        color: var(--muted);
+        margin: 0 0 12px;
+        max-width: 54ch;
+      }
+      .sample-stats {
+        display: flex;
+        gap: 22px;
+        flex-wrap: wrap;
+        font-size: 13px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .sample-stats b {
+        display: block;
+        color: var(--ink);
+        font-size: 28px;
+        letter-spacing: 0;
+        line-height: 1;
+        margin-bottom: 4px;
+      }
+      .pick {
+        margin-top: 14px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      code {
+        font-size: 12px;
+        background: #efe8db;
+        padding: 1px 6px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>落地页英文字体预览</h1>
+    <p class="lead">
+      用你页面里的真实文案对比。建议：大标题用 Display / Condensed；描述句用可读 Sans；数据标签用窄体大写。
+      在浏览器打开本文件即可（已接 Google Fonts）。选定后告诉我编号或字体名即可替换。
+    </p>
+
+    <div class="grid" id="grid"></div>
+
+    <script>
+      const fonts = [
+        {
+          id: "A",
+          name: "Bebas Neue",
+          family: "'Bebas Neue', sans-serif",
+          vibe: "运动海报 / 强冲击",
+          best: "大标题 Scramble / Solve / Master",
+        },
+        {
+          id: "B",
+          name: "Oswald",
+          family: "'Oswald', sans-serif",
+          vibe: "竞技 condensed",
+          best: "大标题 + 数据标签",
+        },
+        {
+          id: "C",
+          name: "Anton",
+          family: "'Anton', sans-serif",
+          vibe: "极致窄黑 / 广告感",
+          best: "仅大标题",
+        },
+        {
+          id: "D",
+          name: "Syne",
+          family: "'Syne', sans-serif",
+          vibe: "当代几何 / 品牌感",
+          best: "大标题 + Tagline",
+        },
+        {
+          id: "E",
+          name: "Space Grotesk",
+          family: "'Space Grotesk', sans-serif",
+          vibe: "科技几何",
+          best: "全站英文统一",
+        },
+        {
+          id: "F",
+          name: "Unbounded",
+          family: "'Unbounded', sans-serif",
+          vibe: "宽体展示 / 潮流",
+          best: "大标题",
+        },
+        {
+          id: "G",
+          name: "Archivo Black",
+          family: "'Archivo Black', sans-serif",
+          vibe: "粗黑海报",
+          best: "大标题",
+        },
+        {
+          id: "H",
+          name: "Barlow Condensed",
+          family: "'Barlow Condensed', sans-serif",
+          vibe: "信息图表 / HUD",
+          best: "数据标签 + CTA",
+        },
+        {
+          id: "I",
+          name: "Teko",
+          family: "'Teko', sans-serif",
+          vibe: "电竞窄体",
+          best: "大标题 + 数据",
+        },
+        {
+          id: "J",
+          name: "Russo One",
+          family: "'Russo One', sans-serif",
+          vibe: "游戏/机械",
+          best: "大标题",
+        },
+        {
+          id: "K",
+          name: "Chakra Petch",
+          family: "'Chakra Petch', sans-serif",
+          vibe: "硬核科技",
+          best: "Tagline + 数据",
+        },
+        {
+          id: "L",
+          name: "Outfit",
+          family: "'Outfit', sans-serif",
+          vibe: "干净现代",
+          best: "描述句 + 按钮",
+        },
+        {
+          id: "M",
+          name: "Sora",
+          family: "'Sora', sans-serif",
+          vibe: "圆润科技",
+          best: "描述句 + 导航",
+        },
+        {
+          id: "N",
+          name: "DM Sans + DM Serif Display",
+          family: "'DM Sans', sans-serif",
+          titleFamily: "'DM Serif Display', serif",
+          vibe: "衬线标题 + 无衬线正文",
+          best: "标题用 Serif，其余 Sans",
+        },
+        {
+          id: "O",
+          name: "IBM Plex Sans",
+          family: "'IBM Plex Sans', sans-serif",
+          vibe: "工程/产品说明",
+          best: "长描述句",
+        },
+      ];
+
+      const grid = document.getElementById("grid");
+      grid.innerHTML = fonts
+        .map((f) => {
+          const titleFont = f.titleFamily || f.family;
+          return `
+        <article class="card" style="font-family:${f.family}">
+          <div class="meta">
+            <span class="name">${f.id}. ${f.name}</span>
+            <span class="tag">${f.vibe}</span>
+            <span class="use">适合：${f.best}</span>
+          </div>
+          <h2 class="sample-title" style="font-family:${titleFont}">
+            <span>Scramble</span>
+            <span>Solve</span>
+            <span>Master</span>
+          </h2>
+          <p class="sample-tagline">
+            Rotate Your Mind<br />
+            Solve The Chaos<br />
+            Master The Cube
+          </p>
+          <p class="sample-desc">
+            Intelligent Cube Solver — From Scrambled To Solved, Every Move Precise &amp; Controlled
+          </p>
+          <div class="sample-stats">
+            <div><b style="font-family:${titleFont}">+432</b>MS BEST TIME</div>
+            <div><b style="font-family:${titleFont}">+100</b>ALGORITHMS</div>
+            <div><b style="font-family:${titleFont}">+50</b>PRACTICE RUNS</div>
+          </div>
+          <p class="pick">回复例如：<code>大标题用 D Syne，正文用 L Outfit</code></p>
+        </article>`;
+        })
+        .join("");
+    </script>
+  </body>
+</html>

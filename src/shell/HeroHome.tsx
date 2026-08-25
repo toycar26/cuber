@@ -4,6 +4,29 @@ import { AppRoute, NAV_ITEMS } from "./routing";
 
 const ACCENT = "#5E0ED7";
 
+export function BrandLogo({ onClick, title = "智能魔方教学系统" }: { onClick: () => void; title?: string }) {
+  return (
+    <button type="button" className="cuber-logo brand-logo" onClick={onClick} aria-label="返回首页" title={title}>
+      <span className="logo-letters">
+        <span style={{ color: "#ef4444" }}>R</span>
+        <span style={{ color: "#facc15" }}>U</span>
+        <span style={{ color: "#3b82f6" }}>B</span>
+        <span style={{ color: "#22c55e" }}>I</span>
+        <span style={{ color: "#f97316" }}>K</span>
+        <span style={{ color: "#3b82f6" }}>'</span>
+        <span style={{ color: "#facc15" }}>S</span>
+        <span className="logo-cube-word"> CUBE</span>
+      </span>
+      <span className="logo-subtext">
+        <span className="sub-cube">Cube</span>
+        <em className="sub-tutor">Tutor</em>
+        <span className="sub-divider"> · </span>
+        <span className="sub-cn">智能魔方</span>
+      </span>
+    </button>
+  );
+}
+
 export function AppTopNav({
   route,
   onNavigate,
@@ -19,15 +42,14 @@ export function AppTopNav({
 }) {
   return (
     <nav className={`cuber-topnav ${variant === "home" ? "is-home" : "is-app"}`}>
-      <button type="button" className="cuber-logo" onClick={onHome} aria-label="返回首页" title="首页">
-        <span className="cuber-logo-dot" />
-      </button>
+      <BrandLogo onClick={onHome} />
 
       <div className="cuber-topnav-links">
         {NAV_ITEMS.map((item) => (
           <button
             key={item.mode}
             type="button"
+            data-nav-mode={item.mode}
             className={route.mode === item.mode ? "is-active" : ""}
             onClick={() => onNavigate(item.mode)}
           >
@@ -53,16 +75,16 @@ export function HeroChrome({
   onStart: () => void;
 }) {
   const stats = [
-    { value: "432", label: "MS BEST\nTIME" },
-    { value: "100", label: "ALGORITHMS" },
-    { value: "50", label: "PRACTICE\nRUNS" },
+    { value: "3", label: "SOLVE\nENGINES" },
+    { value: "100", label: "CFOP\nALGS" },
+    { value: "∞", label: "AI\nMENTOR" },
   ];
 
   return (
     <div className="hero-chrome">
       <div className="hero-stats">
         {stats.map((s) => (
-          <div key={s.value} className="hero-stat">
+          <div key={s.label} className="hero-stat">
             <div className="hero-stat-num">
               <span className="plus" style={{ color: ACCENT }}>
                 +
@@ -90,7 +112,7 @@ export function HeroChrome({
         </div>
         <div className="hero-row-b">
           <p className="hero-desc">
-            Intelligent Cube Solver — From Scrambled To Solved, Every Move Precise &amp; Controlled
+            AI cube tutor with live 3D — scan your cube, pick a method, and follow every move.
           </p>
           <h1 className="hero-title">
             <span>Scramble</span>
@@ -115,13 +137,59 @@ export function SubTabBar<T extends string>({
   tabs,
   value,
   onChange,
+  alignTo,
+  layoutKey = "",
 }: {
   tabs: { id: T; label: string }[];
   value: T;
   onChange: (id: T) => void;
+  /** 对齐到顶栏对应导航按钮中心 */
+  alignTo?: AppRoute["mode"];
+  /** 布局变化时强制重算（如 chat 开合） */
+  layoutKey?: string;
 }) {
+  const barRef = React.useRef<HTMLDivElement>(null);
+
+  React.useLayoutEffect(() => {
+    const bar = barRef.current;
+    if (!bar || !alignTo) return;
+
+    const place = () => {
+      const btn = document.querySelector(`.cuber-topnav-links button[data-nav-mode="${alignTo}"]`) as HTMLElement | null;
+      const root = bar.offsetParent as HTMLElement | null;
+      if (!btn || !root || btn.offsetParent === null) {
+        // 移动端顶栏链接隐藏：居中
+        bar.style.left = "50%";
+        bar.style.transform = "translateX(-50%)";
+        return;
+      }
+      const br = btn.getBoundingClientRect();
+      const rr = root.getBoundingClientRect();
+      const center = br.left + br.width / 2 - rr.left;
+      bar.style.left = `${center}px`;
+      bar.style.transform = "translateX(-50%)";
+    };
+
+    place();
+    const ro = new ResizeObserver(place);
+    ro.observe(document.documentElement);
+    const nav = document.querySelector(".cuber-topnav");
+    if (nav) ro.observe(nav);
+    window.addEventListener("resize", place);
+    const onTransitionEnd = (e: Event) => {
+      const t = e as TransitionEvent;
+      if (t.propertyName === "right" || t.propertyName === "left" || t.propertyName === "transform") place();
+    };
+    nav?.addEventListener("transitionend", onTransitionEnd);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", place);
+      nav?.removeEventListener("transitionend", onTransitionEnd);
+    };
+  }, [alignTo, layoutKey, tabs.length, value]);
+
   return (
-    <div className="subtab-bar">
+    <div ref={barRef} className={`subtab-bar${alignTo ? ` align-${alignTo}` : ""}`}>
       {tabs.map((tab) => (
         <button key={tab.id} type="button" className={value === tab.id ? "is-active" : ""} onClick={() => onChange(tab.id)}>
           {tab.label}

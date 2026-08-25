@@ -9,6 +9,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      "/api": "http://localhost:8000",
       "/detect": "http://localhost:8000",
       "/health": "http://localhost:8000",
     },

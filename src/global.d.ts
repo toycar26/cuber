@@ -15,3 +15,9 @@ declare module "clipboard" {
   }
   export default ClipboardJS;
 }
+
+interface Window {
+  EmotionBall?: {
+    create: (el: HTMLElement, opts?: unknown) => unknown;
+  };
+}
