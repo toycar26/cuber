@@ -3,12 +3,14 @@ import React, {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  ArrowUpRight,
   BookOpen,
   Camera,
   Check,
@@ -42,7 +44,6 @@ import {
   SlidersHorizontal,
   Sparkles,
   Trash2,
-  Wand2,
   X,
 } from "lucide-react";
 import * as THREE from "three";
@@ -77,8 +78,24 @@ import Util from "./common/util";
 import GIF from "./common/gif";
 import ZIP from "./common/zip";
 import algsJson from "./vue/Algs/algs.json";
+import {
+  AppMode,
+  AppRoute,
+  GUIDE_TABS,
+  GuideTab,
+  NAV_ITEMS,
+  SETTINGS_TABS,
+  SettingsTab,
+  TEACH_TABS,
+  TeachTab,
+  panelHeightFor,
+  readRoute,
+  routeToUrl,
+} from "./shell/routing";
+import { AppTopNav, HeroChrome, SubTabBar } from "./shell/HeroHome";
 
-type Mode = "playground" | "helper" | "algs" | "director" | "player" | "help";
+/** @deprecated legacy mode ids still appear in a few share / help strings */
+type Mode = "playground" | "helper" | "algs" | "director" | "player" | "help" | AppMode;
 type StickerMap = { [face: string]: { [index: number]: string } | undefined };
 
 type AppContext = {
@@ -87,23 +104,44 @@ type AppContext = {
   palette: PaletteData;
 };
 
-const modeLabels: Record<Mode, string> = {
+const modeLabels: Record<string, string> = {
   playground: "练习",
   helper: "求解",
   algs: "公式",
   director: "动画",
   player: "播放",
   help: "帮助",
+  home: "首页",
+  guide: "规则图鉴",
+  teach: "教学台",
+  train: "计时训练",
+  settings: "设置",
 };
 
-function readMode(): Mode {
-  const mode = new URLSearchParams(location.search).get("mode") as Mode | null;
-  return mode && modeLabels[mode] ? mode : "playground";
-}
+type NavigateFn = (next: Partial<AppRoute> & { mode?: AppMode }) => void;
+
+let navigateRef: NavigateFn = () => undefined;
 
 function openMode(mode: Mode): void {
-  const url = mode === "playground" ? location.pathname : `${location.pathname}?mode=${mode}`;
-  window.location.assign(url);
+  const map: Record<string, AppMode> = {
+    playground: "train",
+    helper: "teach",
+    algs: "guide",
+    director: "settings",
+    player: "player",
+    help: "help",
+    home: "home",
+    guide: "guide",
+    teach: "teach",
+    train: "train",
+    settings: "settings",
+  };
+  const next = map[mode] || "home";
+  if (next === "settings" && mode === "director") navigateRef({ mode: "settings", settingsTab: "director" });
+  else if (next === "guide" && mode === "algs") navigateRef({ mode: "guide", guideTab: "algs" });
+  else if (next === "guide") navigateRef({ mode: "guide", guideTab: "legend" });
+  else if (next === "settings") navigateRef({ mode: "settings", settingsTab: "appear" });
+  else navigateRef({ mode: next });
 }
 
 function useWindowSize() {
@@ -164,23 +202,29 @@ const Viewport = forwardRef<ViewportHandle, { ctx: AppContext }>(({ ctx }, ref) 
   const toucher = useMemo(() => new Toucher(), []);
 
   const draw = useCallback(() => {
-    if (ctx.world.dirty || ctx.world.cube.dirty) {
-      renderer.clear();
-      renderer.render(ctx.world.scene, ctx.world.camera);
-      ctx.world.dirty = false;
-      ctx.world.cube.dirty = false;
-      return true;
-    }
-    return false;
+    renderer.clear();
+    renderer.render(ctx.world.scene, ctx.world.camera);
+    ctx.world.dirty = false;
+    ctx.world.cube.dirty = false;
+    return true;
   }, [ctx.world, renderer]);
 
   useImperativeHandle(ref, () => ({
     resize(width, height) {
-      ctx.world.width = width;
-      ctx.world.height = Math.max(1, height);
+      const w = Math.max(1, Math.floor(width));
+      const h = Math.max(1, Math.floor(height));
+      if (w === ctx.world.width && h === ctx.world.height) {
+        ctx.world.dirty = true;
+        draw();
+        return;
+      }
+      ctx.world.width = w;
+      ctx.world.height = h;
       ctx.world.resize();
-      renderer.setSize(width, Math.max(1, height), true);
+      // false：不改 canvas 行内样式，由 CSS 负责显示尺寸，避免过渡时闪烁
+      renderer.setSize(w, h, false);
       ctx.world.dirty = true;
+      draw();
     },
     draw,
   }));
@@ -257,18 +301,33 @@ function SettingsPanel({
   mode,
   onOrder,
   lockOrder = false,
+  variant = "overlay",
+  activeTab,
+  onTabChange,
+  hideModeNav = false,
 }: {
   ctx: AppContext;
   mode: Mode;
   onOrder?: () => void;
   lockOrder?: boolean;
+  /** overlay = classic modal; inline = settings page text tabs */
+  variant?: "overlay" | "inline";
+  activeTab?: SettingsTab;
+  onTabChange?: (tab: SettingsTab) => void;
+  hideModeNav?: boolean;
 }) {
   const [, force] = useState(0);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(variant === "inline");
   const [resetOpen, setResetOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [scrubbingCamera, setScrubbingCamera] = useState(false);
-  const [tab, setTab] = useState<"order" | "camera" | "control" | "appear" | "palette">("order");
+  const [tab, setTab] = useState<"order" | "camera" | "control" | "appear" | "palette">(
+    activeTab && activeTab !== "director" && activeTab !== "help" ? activeTab : "order"
+  );
+  useEffect(() => {
+    if (activeTab && activeTab !== "director" && activeTab !== "help") setTab(activeTab);
+    if (activeTab === "help") setHelpOpen(true);
+  }, [activeTab]);
   const update = () => {
     ctx.preferance.save();
     force((i) => i + 1);
@@ -304,54 +363,58 @@ function SettingsPanel({
     };
   }, [scrubbingCamera]);
 
-  return (
+  const pickTab = (key: string) => {
+    if (key === "help") {
+      setHelpOpen(true);
+      onTabChange?.("help");
+      return;
+    }
+    if (key === "director") {
+      onTabChange?.("director");
+      return;
+    }
+    setTab(key as typeof tab);
+    onTabChange?.(key as SettingsTab);
+  };
+
+  const settingsBody = (
     <>
-      <button className="floating-menu" title="菜单" onClick={() => setOpen(true)}>
-        <Menu />
-      </button>
-      <Modal
-        title="Cuber 控制台"
-        open={open}
-        onClose={() => setOpen(false)}
-        className={`settings-modal live-preview ${scrubbingCamera ? "scrubbing-preview" : ""}`}
-        backdropClassName="preview-backdrop"
-      >
-        <div className="settings-chrome">
-          <nav className="mode-nav">
-            {(["playground", "helper", "algs", "director"] as Mode[]).map((item) => (
-              <button key={item} className={mode === item ? "selected" : ""} onClick={() => openMode(item)}>
-                {modeLabels[item]}
+      <div className={`settings-chrome ${variant === "inline" ? "inline-chrome" : ""}`}>
+        {!hideModeNav && (
+          <nav className="mode-nav text-nav">
+            {NAV_ITEMS.map((item) => (
+              <button key={item.mode} className={mode === item.mode ? "selected" : ""} onClick={() => openMode(item.mode)}>
+                {item.label}
               </button>
             ))}
           </nav>
-          <div className="settings-tabs-row">
-            <div className="settings-tabs">
-              {[
-                ["order", "阶数", <Settings key="o" />],
-                ["camera", "镜头", <Camera key="c" />],
-                ["control", "控制", <SlidersHorizontal key="s" />],
-                ["appear", "显示", <Sparkles key="a" />],
-                ["palette", "配色", <Palette key="p" />],
-                ["help", "帮助", <HelpCircle key="h" />],
-              ].map(([key, label, icon]) => (
-                <button
-                  key={key as string}
-                  className={tab === key ? "selected" : ""}
-                  onClick={() => {
-                    if (key === "help") {
-                      setHelpOpen(true);
-                    } else {
-                      setTab(key as typeof tab);
-                    }
-                  }}
-                >
-                  {icon}
-                  <span>{label}</span>
-                </button>
-              ))}
-            </div>
+        )}
+        <div className="settings-tabs-row">
+          <div className={`settings-tabs ${variant === "inline" ? "text-tabs" : ""}`}>
+            {(variant === "inline"
+              ? SETTINGS_TABS.map(({ id, label }) => [id, label, null] as const)
+              : ([
+                  ["order", "阶数", <Settings key="o" />],
+                  ["camera", "镜头", <Camera key="c" />],
+                  ["control", "控制", <SlidersHorizontal key="s" />],
+                  ["appear", "显示", <Sparkles key="a" />],
+                  ["palette", "配色", <Palette key="p" />],
+                  ["help", "帮助", <HelpCircle key="h" />],
+                ] as const)
+            ).map(([key, label, icon]) => (
+              <button
+                key={key as string}
+                className={(variant === "inline" ? activeTab === key : tab === key) ? (variant === "inline" ? "is-active" : "selected") : ""}
+                onClick={() => pickTab(key as string)}
+              >
+                {icon}
+                <span>{label}</span>
+              </button>
+            ))}
           </div>
         </div>
+      </div>
+      {!(variant === "inline" && (activeTab === "director" || activeTab === "help")) && (
         <div className="settings-content">
           {tab === "order" && (
             <div className="button-grid">
@@ -414,10 +477,78 @@ function SettingsPanel({
                   <span>{key}</span>
                 </label>
               ))}
-              <button className="palette-card palette-reset" onClick={() => ctx.palette.reset()}>恢复默认</button>
+              <button className="palette-card palette-reset" onClick={() => ctx.palette.reset()}>
+                恢复默认
+              </button>
             </div>
           )}
         </div>
+      )}
+    </>
+  );
+
+  if (variant === "inline") {
+    return (
+      <>
+        <div className={`settings-inline-panel ${scrubbingCamera ? "scrubbing-preview" : ""}`}>{settingsBody}</div>
+        <Modal title="Cuber 使用帮助" open={helpOpen} onClose={() => setHelpOpen(false)} className="help-modal">
+          <div className="help-modal-body">
+            <HelpContent compact />
+            <div className="danger-zone">
+              <button className="settings-reset danger" onClick={() => setResetOpen(true)}>
+                <Trash2 />
+                <span>重置数据</span>
+              </button>
+            </div>
+          </div>
+        </Modal>
+        <Modal title="重置数据" open={resetOpen} onClose={() => setResetOpen(false)}>
+          <p>选择要重置的范围。</p>
+          <div className="modal-actions">
+            <button onClick={() => setResetOpen(false)}>取消</button>
+            <button
+              onClick={() => {
+                resetConfig();
+                setResetOpen(false);
+              }}
+            >
+              配置
+            </button>
+            <button
+              className="danger"
+              onClick={() => {
+                localStorage.clear();
+                location.reload();
+              }}
+            >
+              全部
+            </button>
+          </div>
+        </Modal>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <nav className="console-text-nav" aria-label="控制台导航">
+        {NAV_ITEMS.map((item) => (
+          <button key={item.mode} type="button" className={mode === item.mode ? "selected" : ""} onClick={() => openMode(item.mode)}>
+            {item.label}
+          </button>
+        ))}
+        <button type="button" className="console-text-settings" onClick={() => setOpen(true)}>
+          控制台
+        </button>
+      </nav>
+      <Modal
+        title="Cuber 控制台"
+        open={open}
+        onClose={() => setOpen(false)}
+        className={`settings-modal live-preview ${scrubbingCamera ? "scrubbing-preview" : ""}`}
+        backdropClassName="preview-backdrop"
+      >
+        {settingsBody}
       </Modal>
       <Modal title="Cuber 使用帮助" open={helpOpen} onClose={() => setHelpOpen(false)} className="help-modal">
         <div className="help-modal-body">
@@ -434,8 +565,23 @@ function SettingsPanel({
         <p>选择要重置的范围。</p>
         <div className="modal-actions">
           <button onClick={() => setResetOpen(false)}>取消</button>
-          <button onClick={() => { resetConfig(); setResetOpen(false); }}>配置</button>
-          <button className="danger" onClick={() => { localStorage.clear(); location.reload(); }}>全部</button>
+          <button
+            onClick={() => {
+              resetConfig();
+              setResetOpen(false);
+            }}
+          >
+            配置
+          </button>
+          <button
+            className="danger"
+            onClick={() => {
+              localStorage.clear();
+              location.reload();
+            }}
+          >
+            全部
+          </button>
         </div>
       </Modal>
     </>
@@ -721,6 +867,7 @@ function SceneShell({
   children,
   onOrder,
   lockOrder,
+  embedded = false,
 }: {
   ctx: AppContext;
   mode: Mode;
@@ -728,28 +875,34 @@ function SceneShell({
   children: React.ReactNode;
   onOrder?: () => void;
   lockOrder?: boolean;
+  /** When true, parent owns Viewport + top navigation */
+  embedded?: boolean;
 }) {
   const viewport = useRef<ViewportHandle>(null);
   const { width, height } = useWindowSize();
   useEffect(() => {
+    if (embedded) return;
     viewport.current?.resize(width, Math.max(1, height - viewportHeight));
-  }, [height, viewportHeight, width]);
-  useAnimation(() => viewport.current?.draw());
+  }, [embedded, height, viewportHeight, width]);
+  useAnimation(() => {
+    if (!embedded) viewport.current?.draw();
+  });
   useEffect(() => {
     ctx.preferance.refresh();
     ctx.palette.refresh();
   }, [ctx]);
   return (
-    <main className="app-shell">
-      <SettingsPanel ctx={ctx} mode={mode} onOrder={onOrder} lockOrder={lockOrder} />
-      <Viewport ref={viewport} ctx={ctx} />
+    <main className={`app-shell ${embedded ? "embedded" : ""}`}>
+      {!embedded && <SettingsPanel ctx={ctx} mode={mode} onOrder={onOrder} lockOrder={lockOrder} hideModeNav />}
+      {!embedded && <Viewport ref={viewport} ctx={ctx} />}
       {children}
     </main>
   );
 }
 
-function Playground() {
-  const ctx = useAppContext();
+function Playground({ ctx: externalCtx, embedded = false }: { ctx?: AppContext; embedded?: boolean } = {}) {
+  const localCtx = useAppContext();
+  const ctx = externalCtx || localCtx;
   const data = useMemo(() => new PlaygroundData(), []);
   const [, force] = useState(0);
   const [scrambleOpen, setScrambleOpen] = useState(false);
@@ -780,15 +933,22 @@ function Playground() {
   }, [ctx.world, data, sync]);
 
   const load = useCallback(() => {
-    if (data.scene === "*") {
-      scramble();
-      return;
-    }
-    ctx.world.order = data.order;
-    ctx.world.cube.twister.setup(data.scene);
-    for (const action of new TwistNode(data.history).parse()) ctx.world.cube.twister.twist(action, true, true);
-    sync();
-  }, [ctx.world, data, scramble, sync]);
+    // 每次进入计时训练都从复原状态开始，避免沿用教学台或上次训练的打乱
+    ctx.world.order = data.order || 3;
+    ctx.world.cube.twister.finish();
+    ctx.world.cube.reset();
+    ctx.world.cube.strip({});
+    ctx.world.cube.history.clear();
+    ctx.world.cube.history.init = "";
+    data.history = "";
+    data.scene = "*";
+    data.complete = true;
+    data.start = 0;
+    data.now = 0;
+    data.save();
+    force((i) => i + 1);
+    ctx.world.dirty = true;
+  }, [ctx.world, data]);
 
   useEffect(load, [load]);
   useEffect(() => {
@@ -833,8 +993,9 @@ function Playground() {
   return (
     <SceneShell
       ctx={ctx}
-      mode="playground"
+      mode="train"
       viewportHeight={100}
+      embedded={embedded}
       onOrder={() => {
         data.order = ctx.world.order;
         data.save();
@@ -1430,7 +1591,7 @@ function LegendDrawer({ open, onClose }: { open: boolean; onClose: () => void })
         <header>
           <strong>
             <Compass />
-            操作图例
+            操作图鉴
           </strong>
           <IconButton title="关闭" onClick={onClose}>
             <X />
@@ -1801,41 +1962,80 @@ function SolutionPlayer({
   );
 }
 
-function Helper() {
-  const ctx = useAppContext();
+function Helper({
+  ctx: externalCtx,
+  embedded = false,
+  tab = "input",
+  onResultChange,
+}: {
+  ctx?: AppContext;
+  embedded?: boolean;
+  tab?: TeachTab;
+  onResultChange?: (has: boolean) => void;
+} = {}) {
+  const localCtx = useAppContext();
+  const ctx = externalCtx || localCtx;
   const solver = useMemo(() => new Solver(), []);
-  const [color, setColor] = useState("R");
   const [stickers, setStickers] = useState<StickerMap>(() => JSON.parse(localStorage.getItem("helper-stickers") || "{}"));
   const [methodOpen, setMethodOpen] = useState(false);
-  const [legendOpen, setLegendOpen] = useState(false);
   const [result, setResult] = useState<SolveResult | null>(null);
   const [resultScene, setResultScene] = useState("");
   const [errorText, setErrorText] = useState("");
-  const [state, setState] = useState("");
   const [scanOpen, setScanOpen] = useState(false);
+  const applyStickers = useCallback(
+    (map: StickerMap) => {
+      for (const face of [FACE.L, FACE.R, FACE.D, FACE.U, FACE.B, FACE.F]) {
+        const list = map[FACE[face]];
+        if (list) for (const sticker in list) ctx.world.cube.stick(Number(sticker), face, list[sticker]);
+      }
+      ctx.world.dirty = true;
+    },
+    [ctx.world]
+  );
+  const persistStickers = useCallback((next: StickerMap) => {
+    setStickers(next);
+    localStorage.setItem("helper-stickers", JSON.stringify(next));
+  }, []);
+  const captureStickersFromCube = useCallback(() => {
+    const facelets = ctx.world.cube.serialize();
+    ctx.world.cube.twister.finish();
+    ctx.world.cube.reset();
+    ctx.world.cube.strip({});
+    ctx.world.cube.history.clear();
+    const next: StickerMap = {};
+    let offset = 0;
+    for (const fk of FACE_KEYS) {
+      const indices = FACELET_INDICES[fk];
+      const faceEnum = FACE_ENUM[fk];
+      const map: { [index: number]: string } = {};
+      for (let i = 0; i < 9; i++) {
+        const color = facelets[offset + i];
+        map[indices[i]] = color;
+        ctx.world.cube.stick(indices[i], faceEnum, color);
+      }
+      next[fk] = map;
+      offset += 9;
+    }
+    persistStickers(next);
+    ctx.world.dirty = true;
+  }, [ctx.world, persistStickers]);
+  // 进入教学台时把本地贴纸恢复到共享魔方（录入/还原之间保持同一状态）
   useEffect(() => {
     ctx.world.order = 3;
-    ctx.world.controller.taps.push((index, face) => {
-      if (face != null && index >= 0) {
-        const cubelet = ctx.world.cube.cubelets[index];
-        const initial = cubelet.initial;
-        const realFace = cubelet.getFace(face);
-        setStickers((value) => {
-          const next = { ...value, [FACE[realFace]]: { ...(value[FACE[realFace]] || {}), [initial]: color } };
-          localStorage.setItem("helper-stickers", JSON.stringify(next));
-          ctx.world.cube.stick(initial, realFace, color);
-          setState(ctx.world.cube.serialize());
-          return next;
-        });
-      }
-    });
-  }, [color, ctx.world]);
+    ctx.world.cube.twister.finish();
+    ctx.world.cube.reset();
+    ctx.world.cube.strip({});
+    ctx.world.cube.history.clear();
+    applyStickers(stickers);
+    // 仅在挂载时恢复
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyStickers, ctx.world]);
   useAnimation(() => solver.init());
   const reset = () => {
+    ctx.world.cube.twister.finish();
     ctx.world.cube.reset();
-    // 重置所有贴纸为各面默认颜色：strip({}) 会令每个贴纸 stick(face, "")
-    // 恢复为该面默认材质并设为可见
     ctx.world.cube.strip({});
+    ctx.world.cube.history.clear();
     const next: StickerMap = {};
     for (const face of [FACE.L, FACE.R, FACE.D, FACE.U, FACE.B, FACE.F]) {
       const key = FACE[face];
@@ -1843,15 +2043,25 @@ function Helper() {
       next[key] = {};
       for (const index of group.indices) next[key]![index] = key;
     }
-    setStickers(next);
-    localStorage.setItem("helper-stickers", JSON.stringify(next));
-    setState(ctx.world.cube.serialize());
+    persistStickers(next);
+    ctx.world.dirty = true;
   };
   const clear = () => {
-    setStickers({});
+    persistStickers({});
     localStorage.removeItem("helper-stickers");
+    ctx.world.cube.twister.finish();
+    ctx.world.cube.reset();
     ctx.world.cube.strip({});
-    setState(ctx.world.cube.serialize());
+    ctx.world.cube.history.clear();
+    ctx.world.dirty = true;
+  };
+  const scrambleRandom = () => {
+    ctx.world.cube.twister.finish();
+    ctx.world.cube.reset();
+    ctx.world.cube.strip({});
+    ctx.world.cube.history.clear();
+    ctx.world.cube.twister.twist(new TwistAction("*"), true, true);
+    captureStickersFromCube();
   };
   const runSolve = (method: SolveMethod) => {
     const ret = solver.solvePhased(ctx.world.cube.serialize(), method);
@@ -1876,6 +2086,9 @@ function Helper() {
     }
     setResult(null);
   };
+  useEffect(() => {
+    onResultChange?.(!!result);
+  }, [onResultChange, result]);
   const applyScan = (faces: Record<FaceKey, FaceKey[]>) => {
     const next: StickerMap = { ...stickers };
     for (const fk of FACE_KEYS) {
@@ -1891,40 +2104,44 @@ function Helper() {
       }
       next[fk] = map;
     }
-    setStickers(next);
-    localStorage.setItem("helper-stickers", JSON.stringify(next));
-    setState(ctx.world.cube.serialize());
+    persistStickers(next);
+    ctx.world.dirty = true;
     setScanOpen(false);
   };
-  const counts = [...state].reduce<Record<string, number>>((acc, item) => ({ ...acc, [item]: (acc[item] || 0) + 1 }), {});
+  const showPlayer = tab === "solve" && !!result;
+  const showInputTools = tab === "input" && !result;
+  const showSolveTools = tab === "solve" && !result;
   return (
-    <SceneShell ctx={ctx} mode="helper" viewportHeight={result ? 360 : 204} lockOrder>
-      {result ? (
+    <SceneShell ctx={ctx} mode="teach" viewportHeight={showPlayer ? 360 : showSolveTools ? 100 : 120} lockOrder embedded={embedded}>
+      {showPlayer ? (
         <SolutionPlayer
           ctx={ctx}
-          result={result}
+          result={result!}
           scene={resultScene}
           stickers={stickers}
           onClose={exitPlayer}
         />
       ) : (
-        <div className="bottom-panel tall">
-          <div className="color-grid">
-            {["R", "F", "D", "L", "B", "U"].map((item) => (
-              <button key={item} className={color === item ? "selected" : ""} style={{ background: COLORS[item] }} onClick={() => setColor(item)}>
-                {color === item ? <Wand2 /> : counts[item] || 0}
-              </button>
-            ))}
-            <button onClick={() => setMethodOpen(true)}><Sparkles />求解</button>
-            <button onClick={() => setScanOpen(true)}><ScanLine />录入</button>
-            <button onClick={reset}><RefreshCw />重置</button>
-            <button className="danger" onClick={clear}><Trash2 />清空</button>
-            <button onClick={() => setLegendOpen(true)}><Compass />图例</button>
+        <div className={`bottom-panel ${showInputTools ? "helper-input-panel" : "helper-solve-panel"}`}>
+          <div className="helper-actions">
+            {showInputTools && (
+              <>
+                <button type="button" onClick={() => setScanOpen(true)}><ScanLine />录入</button>
+                <button type="button" onClick={scrambleRandom}><Shuffle />随机打乱</button>
+                <button type="button" onClick={reset}><RefreshCw />重置</button>
+                <button type="button" className="danger" onClick={clear}><Trash2 />清空</button>
+              </>
+            )}
+            {showSolveTools && (
+              <>
+                <button type="button" onClick={() => setMethodOpen(true)}><Sparkles />求解</button>
+                <button type="button" onClick={reset}><RefreshCw />重置状态</button>
+              </>
+            )}
           </div>
         </div>
       )}
       <MethodSelect open={methodOpen} onClose={() => setMethodOpen(false)} onPick={runSolve} />
-      <LegendDrawer open={legendOpen} onClose={() => setLegendOpen(false)} />
       <ScannerPanel open={scanOpen} onClose={() => setScanOpen(false)} onConfirm={applyScan} />
       <Modal title="求解失败" open={!!errorText} onClose={() => setErrorText("")}>
         <p className="error-text">{errorText}</p>
@@ -1936,8 +2153,9 @@ function Helper() {
   );
 }
 
-function Player() {
-  const ctx = useAppContext();
+function Player({ ctx: externalCtx, embedded = false }: { ctx?: AppContext; embedded?: boolean } = {}) {
+  const localCtx = useAppContext();
+  const ctx = externalCtx || localCtx;
   const [scene, setScene] = useState("");
   const [action, setAction] = useState("");
   const [open, setOpen] = useState(false);
@@ -1962,7 +2180,7 @@ function Player() {
     }
   }, [ctx.world]);
   return (
-    <SceneShell ctx={ctx} mode="player" viewportHeight={100} lockOrder>
+    <SceneShell ctx={ctx} mode="player" viewportHeight={100} lockOrder embedded={embedded}>
       <div className="score-pill clickable" onClick={() => setOpen(true)}><Code2 />脚本</div>
       <div className="bottom-panel"><Playbar ctx={ctx} scene={scene} action={action} /></div>
       <Modal title="播放脚本" open={open} onClose={() => setOpen(false)}>
@@ -1973,8 +2191,17 @@ function Player() {
   );
 }
 
-function Algs() {
-  const ctx = useAppContext();
+function Algs({
+  ctx: externalCtx,
+  embedded = false,
+  ready = true,
+}: {
+  ctx?: AppContext;
+  embedded?: boolean;
+  ready?: boolean;
+} = {}) {
+  const localCtx = useAppContext();
+  const ctx = externalCtx || localCtx;
   const data = useMemo(() => algsJson as { name: string; strip: { [face: string]: number[] | undefined }; items: { name: string; origin: string; exp?: string; order?: number; scramble?: boolean }[] }[], []);
   const [group, setGroup] = useState(0);
   const [index, setIndex] = useState(0);
@@ -1982,13 +2209,15 @@ function Algs() {
   const [action, setAction] = useState("");
   const current = data[group].items[index];
   useEffect(() => {
+    if (!ready) return;
     const order = current.order || 3;
     if (ctx.world.order !== order) ctx.world.order = order;
     ctx.world.cube.strip(data[group].strip);
     setAction(current.exp || current.origin);
-  }, [ctx.world, current, data, group]);
+    ctx.world.dirty = true;
+  }, [ctx.world, current, data, group, ready]);
   return (
-    <SceneShell ctx={ctx} mode="algs" viewportHeight={158} lockOrder>
+    <SceneShell ctx={ctx} mode="guide" viewportHeight={158} lockOrder embedded={embedded}>
       <button className="score-pill clickable" onClick={() => setList(true)}><BookOpen />{current.name}</button>
       <div className="bottom-panel medium">
         <div className="script-row">
@@ -2016,8 +2245,9 @@ function Algs() {
   );
 }
 
-function Director() {
-  const ctx = useAppContext();
+function Director({ ctx: externalCtx, embedded = false }: { ctx?: AppContext; embedded?: boolean } = {}) {
+  const localCtx = useAppContext();
+  const ctx = externalCtx || localCtx;
   const playbar = useRef<PlaybarHandle>(null);
   const [scene, setScene] = useState("x2^");
   const [action, setAction] = useState("RUR'U'~");
@@ -2114,7 +2344,7 @@ function Director() {
     navigator.clipboard?.writeText(url).catch(() => undefined);
   };
   return (
-    <SceneShell ctx={ctx} mode="director" viewportHeight={204}>
+    <SceneShell ctx={ctx} mode="settings" viewportHeight={204} embedded={embedded}>
       <div className="bottom-panel tall">
         <div className="toolbar primary-toolbar">
           <IconButton title="输出设置" disabled={recording} onClick={() => setOutput(true)}><Settings /></IconButton>
@@ -2286,23 +2516,621 @@ function HelpContent({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function HelpPage() {
+function HelpPage({ onHome }: { onHome?: () => void }) {
   return (
     <main className="document-shell">
-      <button className="floating-menu" title="返回练习" onClick={() => openMode("playground")}><Home /></button>
+      <button className="floating-menu" title="返回首页" onClick={() => (onHome ? onHome() : openMode("home"))}>
+        <Home />
+      </button>
       <HelpContent />
     </main>
   );
 }
 
+function invertTwistToken(token: string): string {
+  const action = new TwistAction(token);
+  if (action.times % 2 === 0) return action.value;
+  return new TwistAction(action.sign, !action.reverse, action.times).value;
+}
+
+const CONTENT_SCENE_X = Math.PI / 6;
+const CONTENT_SCENE_Y = -Math.PI / 4 + Math.PI / 16;
+
+type PoseLerp = {
+  start: number;
+  duration: number;
+  fromCubeX: number;
+  fromCubeY: number;
+  fromCubeZ: number;
+  fromPosY: number;
+  fromSceneX: number;
+  fromSceneY: number;
+};
+
+function startPoseLerpToContent(ctx: AppContext, duration = 800): PoseLerp {
+  return {
+    start: performance.now(),
+    duration,
+    fromCubeX: ctx.world.cube.rotation.x,
+    fromCubeY: ctx.world.cube.rotation.y,
+    fromCubeZ: ctx.world.cube.rotation.z,
+    fromPosY: ctx.world.cube.position.y,
+    fromSceneX: ctx.world.scene.rotation.x,
+    fromSceneY: ctx.world.scene.rotation.y,
+  };
+}
+
+function tickPoseLerp(ctx: AppContext, lerp: PoseLerp): boolean {
+  const t = Math.min(1, (performance.now() - lerp.start) / lerp.duration);
+  const e = 1 - (1 - t) ** 3;
+  ctx.world.cube.rotation.x = lerp.fromCubeX * (1 - e);
+  ctx.world.cube.rotation.y = lerp.fromCubeY * (1 - e);
+  ctx.world.cube.rotation.z = lerp.fromCubeZ * (1 - e);
+  ctx.world.cube.position.y = lerp.fromPosY * (1 - e);
+  ctx.world.scene.rotation.x = lerp.fromSceneX + (CONTENT_SCENE_X - lerp.fromSceneX) * e;
+  ctx.world.scene.rotation.y = lerp.fromSceneY + (CONTENT_SCENE_Y - lerp.fromSceneY) * e;
+  ctx.world.cube.updateMatrix();
+  ctx.world.scene.updateMatrix();
+  ctx.world.dirty = true;
+  return t >= 1;
+}
+
+function snapContentPose(ctx: AppContext) {
+  ctx.world.cube.rotation.set(0, 0, 0);
+  ctx.world.cube.position.set(0, 0, 0);
+  ctx.world.cube.updateMatrix();
+  ctx.world.scene.rotation.x = CONTENT_SCENE_X;
+  ctx.world.scene.rotation.y = CONTENT_SCENE_Y;
+  ctx.world.scene.updateMatrix();
+  ctx.world.dirty = true;
+}
+
+function restoreSolvedCube(ctx: AppContext, opts?: { keepPose?: boolean }) {
+  ctx.world.order = 3;
+  ctx.world.cube.twister.finish();
+  ctx.world.cube.reset();
+  ctx.world.cube.strip({});
+  ctx.world.cube.history.clear();
+  ctx.world.cube.history.init = "";
+  if (!opts?.keepPose) {
+    snapContentPose(ctx);
+  } else {
+    ctx.world.cube.position.y = 0;
+    ctx.world.cube.updateMatrix();
+    ctx.world.dirty = true;
+  }
+}
+
+function LegendPanel({ ctx }: { ctx: AppContext }) {
+  const [active, setActive] = useState<string | null>(null);
+  const demoLock = useRef(false);
+  const restoring = useRef(false);
+  const restoreTimer = useRef<number | null>(null);
+  const pendingInverse = useRef<string | null>(null);
+
+  const clearRestoreTimer = () => {
+    if (restoreTimer.current != null) {
+      window.clearTimeout(restoreTimer.current);
+      restoreTimer.current = null;
+    }
+  };
+
+  const finishRestoreCycle = useCallback(() => {
+    pendingInverse.current = null;
+    ctx.world.cube.history.clear();
+    setActive(null);
+    demoLock.current = false;
+    restoring.current = false;
+  }, [ctx.world.cube.history]);
+
+  const twistBackAnimated = useCallback(
+    (token: string | null) => {
+      restoring.current = true;
+      if (token) {
+        pendingInverse.current = invertTwistToken(token);
+        ctx.world.cube.twister.twist(new TwistAction(pendingInverse.current), false, false);
+        return;
+      }
+      const list = [...ctx.world.cube.history.list].reverse();
+      if (list.length === 0) {
+        finishRestoreCycle();
+        return;
+      }
+      const queue = list.map((item) => new TwistAction(item.sign, !item.reverse, item.times));
+      let i = 0;
+      const step = () => {
+        if (i >= queue.length) {
+          ctx.world.callbacks = ctx.world.callbacks.filter((cb) => cb !== step);
+          ctx.world.cube.history.clear();
+          finishRestoreCycle();
+          return;
+        }
+        const action = queue[i];
+        const ok = ctx.world.cube.twister.twist(action, false, false);
+        if (ok) i += 1;
+      };
+      ctx.world.callbacks.push(step);
+      step();
+    },
+    [ctx, finishRestoreCycle]
+  );
+
+  const scheduleRestore = useCallback(
+    (token: string | null, delay = 1000) => {
+      clearRestoreTimer();
+      restoreTimer.current = window.setTimeout(() => {
+        restoreTimer.current = null;
+        twistBackAnimated(token);
+      }, delay);
+    },
+    [twistBackAnimated]
+  );
+
+  useEffect(() => {
+    // 状态已由 App 在切页时重置，这里只挂交互回调，避免重复 reset 造成卡顿
+    const onChanged = () => {
+      if (restoring.current && pendingInverse.current) {
+        pendingInverse.current = null;
+        finishRestoreCycle();
+        return;
+      }
+      if (demoLock.current || restoring.current) return;
+      scheduleRestore(null, 1000);
+    };
+    ctx.world.callbacks.push(onChanged);
+    return () => {
+      clearRestoreTimer();
+      ctx.world.callbacks = ctx.world.callbacks.filter((item) => item !== onChanged);
+    };
+  }, [ctx, finishRestoreCycle, scheduleRestore]);
+
+  const demoMove = (token: string) => {
+    clearRestoreTimer();
+    demoLock.current = true;
+    setActive(token);
+    restoring.current = true;
+    ctx.world.cube.twister.finish();
+    ctx.world.cube.reset();
+    ctx.world.cube.history.clear();
+    restoring.current = false;
+    pendingInverse.current = null;
+    requestAnimationFrame(() => {
+      ctx.world.cube.twister.twist(new TwistAction(token), false, false);
+      scheduleRestore(token, 1000);
+    });
+  };
+
+  const Token = ({ token }: { token: string }) => (
+    <button type="button" className={`legend-token ${active === token ? "active" : ""}`} onClick={() => demoMove(token)} title={`演示 ${token}`}>
+      {token}
+    </button>
+  );
+
+  return (
+    <aside className="legend-panel">
+      <header>
+        <strong>
+          <Compass />
+          操作图鉴
+        </strong>
+      </header>
+      <p className="legend-hint">点击记号可演示对应转动；手动旋转后也会自动复原。</p>
+      <div className="legend-body">
+        <section>
+          <h3>
+            <Layers />
+            单层旋转（大写）
+          </h3>
+          <p className="legend-hint">从该面外侧看，顺时针 90° 为基本方向；加 ' 表示反向，加 2 表示 180°。</p>
+          <div className="legend-grid">
+            {LEGEND_FACES.map(({ face, name }) => (
+              <div className="legend-row" key={face}>
+                <Token token={face} />
+                <span className="legend-desc">
+                  {name}顺时针 90°
+                  <RotateCw className="legend-arrow" />
+                </span>
+              </div>
+            ))}
+            {LEGEND_FACES.map(({ face, name }) => (
+              <div className="legend-row" key={`${face}'`}>
+                <Token token={`${face}'`} />
+                <span className="legend-desc">
+                  {name}逆时针 90°
+                  <RotateCcw className="legend-arrow" />
+                </span>
+              </div>
+            ))}
+            {LEGEND_FACES.map(({ face, name }) => (
+              <div className="legend-row" key={`${face}2`}>
+                <Token token={`${face}2`} />
+                <span className="legend-desc">{name}转 180°</span>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section>
+          <h3>
+            <Layers />
+            双层旋转（小写）
+          </h3>
+          <p className="legend-hint">小写字母 = 该面 + 相邻中层（两层一起转），方向同大写。</p>
+          <div className="legend-grid">
+            {LEGEND_FACES.map(({ face, name }) => (
+              <div className="legend-row" key={`w${face}`}>
+                <Token token={face.toLowerCase()} />
+                <span className="legend-desc">
+                  {name}+中层顺时针 90°
+                  <RotateCw className="legend-arrow" />
+                </span>
+              </div>
+            ))}
+            {LEGEND_FACES.map(({ face, name }) => (
+              <div className="legend-row" key={`w${face}'`}>
+                <Token token={`${face.toLowerCase()}'`} />
+                <span className="legend-desc">
+                  {name}+中层逆时针 90°
+                  <RotateCcw className="legend-arrow" />
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section>
+          <h3>
+            <Compass />
+            整体旋转
+          </h3>
+          <p className="legend-hint">绕整体坐标轴旋转整个魔方，不改变已涂抹颜色，仅改变观察方向。</p>
+          <div className="legend-grid">
+            {(
+              [
+                ["x", "整体绕 R 方向旋转 90°"],
+                ["x'", "整体绕 R 方向反向 90°"],
+                ["y", "整体绕 U 方向旋转 90°"],
+                ["y'", "整体绕 U 方向反向 90°"],
+                ["z", "整体绕 F 方向旋转 90°"],
+                ["z'", "整体绕 F 方向反向 90°"],
+              ] as const
+            ).map(([token, desc]) => (
+              <div className="legend-row" key={token}>
+                <Token token={token} />
+                <span className="legend-desc">{desc}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </aside>
+  );
+}
+
 function App() {
-  const mode = readMode();
-  if (mode === "helper") return <Helper />;
-  if (mode === "algs") return <Algs />;
-  if (mode === "director") return <Director />;
-  if (mode === "player") return <Player />;
-  if (mode === "help") return <HelpPage />;
-  return <Playground />;
+  const [route, setRoute] = useState<AppRoute>(() => readRoute());
+  const [teachHasResult, setTeachHasResult] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const ctx = useAppContext();
+  const viewport = useRef<ViewportHandle>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const { width, height } = useWindowSize();
+  const isHome = route.mode === "home";
+  const isDocument = route.mode === "help";
+  const isAtlas = route.mode === "guide" && route.guideTab === "legend";
+  const panelHeight = panelHeightFor(route, { teachHasResult });
+
+  const navigate = useCallback<NavigateFn>((partial) => {
+    setRoute((prev) => {
+      const next: AppRoute = { ...prev, ...partial, mode: partial.mode || prev.mode };
+      const url = routeToUrl(next);
+      if (`${location.pathname}${location.search}` !== url) {
+        history.pushState(next, "", url);
+      }
+      return next;
+    });
+    setMobileOpen(false);
+  }, []);
+
+  navigateRef = navigate;
+
+  useEffect(() => {
+    const onPop = () => setRoute(readRoute());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  useEffect(() => {
+    ctx.preferance.refresh();
+    ctx.palette.refresh();
+  }, [ctx]);
+
+  // 落地页 ↔ 内容页：位移中插值朝向；结束后再处理涂黑/贴纸
+  const scopeKey =
+    route.mode === "teach"
+      ? "teach"
+      : route.mode === "guide"
+        ? `guide:${route.guideTab}`
+        : route.mode === "settings"
+          ? `settings:${route.settingsTab}`
+          : route.mode;
+  const prevScopeRef = useRef<string | null>(null);
+  const stageMovingRef = useRef(false);
+  const poseLerpRef = useRef<PoseLerp | null>(null);
+  const pendingScopeRef = useRef<{ prev: string | null; key: string; mode: AppMode } | null>(null);
+  const [cubeSettled, setCubeSettled] = useState(() => route.mode !== "home");
+
+  const applyScopeReset = useCallback(
+    (prev: string | null, key: string, mode: AppMode) => {
+      if (mode === "player") return;
+      snapContentPose(ctx);
+      // 教学台 / 计时训练 / 设置：进入时统一硬重置，避免其它模块污染
+      if (mode === "teach" || mode === "train" || mode === "settings") {
+        if (mode === "teach") ctx.world.order = 3;
+        ctx.world.cube.twister.finish();
+        ctx.world.cube.reset();
+        ctx.world.cube.strip({});
+        ctx.world.cube.history.clear();
+        ctx.world.cube.history.init = "";
+        if (mode === "teach") {
+          try {
+            const map = JSON.parse(localStorage.getItem("helper-stickers") || "{}") as StickerMap;
+            for (const face of [FACE.L, FACE.R, FACE.D, FACE.U, FACE.B, FACE.F]) {
+              const list = map[FACE[face]];
+              if (list) for (const sticker in list) ctx.world.cube.stick(Number(sticker), face, list[sticker]);
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        ctx.world.dirty = true;
+        void prev;
+        void key;
+        return;
+      }
+      // 其它内容页统一先清成完整色块；公式页再由 Algs(ready) 涂黑
+      restoreSolvedCube(ctx, { keepPose: true });
+      snapContentPose(ctx);
+      void prev;
+      void key;
+    },
+    [ctx]
+  );
+
+  const syncStageSize = useCallback(() => {
+    const el = stageRef.current;
+    if (!el || stageMovingRef.current) return;
+    const w = el.clientWidth;
+    const h = el.clientHeight;
+    if (w > 1 && h > 1) viewport.current?.resize(w, h);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (isDocument) return;
+    if (prevScopeRef.current === scopeKey) return;
+    const prev = prevScopeRef.current;
+    prevScopeRef.current = scopeKey;
+    if (prev === null) {
+      if (route.mode !== "home" && route.mode !== "player") {
+        applyScopeReset(prev, scopeKey, route.mode);
+        setCubeSettled(true);
+      }
+      return;
+    }
+    const involvesHome = prev === "home" || scopeKey === "home";
+    if (involvesHome) {
+      stageMovingRef.current = true;
+      setCubeSettled(false);
+      pendingScopeRef.current = { prev, key: scopeKey, mode: route.mode };
+      if (prev === "home") {
+        poseLerpRef.current = startPoseLerpToContent(ctx, 800);
+      } else {
+        // 回首页：立刻清涂黑并保持朝向；过渡中不 idle，结束不再 snap
+        poseLerpRef.current = null;
+        restoreSolvedCube(ctx, { keepPose: true });
+      }
+      return;
+    }
+    applyScopeReset(prev, scopeKey, route.mode);
+    setCubeSettled(true);
+  }, [applyScopeReset, ctx, isDocument, route.mode, scopeKey]);
+
+  useEffect(() => {
+    if (isDocument) return;
+    const el = stageRef.current;
+    if (!el) return;
+
+    const finishMove = () => {
+      if (!stageMovingRef.current && !pendingScopeRef.current) return;
+      stageMovingRef.current = false;
+      const pending = pendingScopeRef.current;
+      pendingScopeRef.current = null;
+      poseLerpRef.current = null;
+      if (pending && pending.key !== "home") {
+        snapContentPose(ctx);
+        applyScopeReset(pending.prev, pending.key, pending.mode);
+      }
+      // 回首页：朝向与色块已在过渡开始时处理好，这里只收尾
+      syncStageSize();
+      setCubeSettled(true);
+    };
+
+    const onTransitionEnd = (e: TransitionEvent) => {
+      if (e.target !== el) return;
+      if (!["left", "top", "width", "height", "transform"].includes(e.propertyName)) return;
+      finishMove();
+    };
+
+    let raf = 0;
+    const onResize = () => {
+      if (stageMovingRef.current) return;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => syncStageSize());
+    };
+
+    syncStageSize();
+    const ro = new ResizeObserver(onResize);
+    ro.observe(el);
+    el.addEventListener("transitionend", onTransitionEnd);
+    const fallback = window.setTimeout(finishMove, 950);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(fallback);
+      ro.disconnect();
+      el.removeEventListener("transitionend", onTransitionEnd);
+    };
+  }, [applyScopeReset, ctx, height, isAtlas, isDocument, isHome, panelHeight, route.mode, scopeKey, syncStageSize, width]);
+
+  const [heroMounted, setHeroMounted] = useState(isHome);
+  const [heroVisible, setHeroVisible] = useState(isHome);
+  const [contentReady, setContentReady] = useState(!isHome);
+  useEffect(() => {
+    if (isHome) {
+      setHeroMounted(true);
+      setContentReady(false);
+      const id = requestAnimationFrame(() => setHeroVisible(true));
+      return () => cancelAnimationFrame(id);
+    }
+    setHeroVisible(false);
+    setContentReady(false);
+    const showContent = window.setTimeout(() => setContentReady(true), 200);
+    const unmountHero = window.setTimeout(() => setHeroMounted(false), 650);
+    return () => {
+      window.clearTimeout(showContent);
+      window.clearTimeout(unmountHero);
+    };
+  }, [isHome]);
+
+  useAnimation(() => {
+    if (isDocument) return;
+    if (poseLerpRef.current) {
+      const done = tickPoseLerp(ctx, poseLerpRef.current);
+      if (done) poseLerpRef.current = null;
+    } else if (isHome && heroVisible && !stageMovingRef.current && ctx.world.order < 10) {
+      const tick = Math.sin((Date.now() / 2800) * Math.PI);
+      ctx.world.cube.rotation.y += 0.004;
+      ctx.world.cube.position.y = (tick * Cubelet.SIZE) / 72;
+      ctx.world.cube.dirty = true;
+      ctx.world.cube.updateMatrix();
+    } else if (!isHome && !stageMovingRef.current) {
+      const scene = ctx.world.scene;
+      if (Math.abs(scene.rotation.x - CONTENT_SCENE_X) > 1e-4 || Math.abs(scene.rotation.y - CONTENT_SCENE_Y) > 1e-4) {
+        snapContentPose(ctx);
+      }
+    }
+    viewport.current?.draw();
+  });
+
+  if (isDocument) {
+    return <HelpPage onHome={() => navigate({ mode: "home" })} />;
+  }
+
+  return (
+    <div className={`cuber-root ${isHome ? "layout-home" : "layout-app"}${isAtlas ? " guide-atlas" : ""}`}>
+      <AppTopNav
+        route={route}
+        variant={isHome ? "home" : "app"}
+        onHome={() => navigate({ mode: "home" })}
+        onNavigate={(mode) => {
+          if (mode === "guide") navigate({ mode, guideTab: "legend" });
+          else if (mode === "settings") navigate({ mode, settingsTab: "appear" });
+          else navigate({ mode });
+        }}
+        onOpenMenu={() => setMobileOpen(true)}
+      />
+
+      {mobileOpen && (
+        <div className="cuber-mobile-menu">
+          <button type="button" className="cuber-logo" onClick={() => navigate({ mode: "home" })} aria-label="首页">
+            <span className="cuber-logo-dot" />
+          </button>
+          <button type="button" className="cuber-mobile-close" onClick={() => setMobileOpen(false)} aria-label="关闭">
+            <X />
+          </button>
+          <ul>
+            {NAV_ITEMS.map((item) => (
+              <li key={item.mode}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (item.mode === "guide") navigate({ mode: "guide", guideTab: "legend" });
+                    else if (item.mode === "settings") navigate({ mode: "settings", settingsTab: "appear" });
+                    else navigate({ mode: item.mode });
+                  }}
+                >
+                  {item.label}
+                </button>
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            className="hero-cta mobile-cta"
+            onClick={() => navigate({ mode: "teach", teachTab: "input" })}
+          >
+            Start Solving
+            <ArrowUpRight size={22} />
+          </button>
+        </div>
+      )}
+
+      <div ref={stageRef} className={`viewport-stage ${isHome ? "stage-left" : "stage-center"}`}>
+        <Viewport ref={viewport} ctx={ctx} />
+      </div>
+
+      {heroMounted && (
+        <div className={`hero-layer ${heroVisible ? "is-visible" : "is-exit"}`}>
+          <HeroChrome
+            onNavigate={(mode) => {
+              if (mode === "guide") navigate({ mode, guideTab: "legend" });
+              else if (mode === "settings") navigate({ mode, settingsTab: "appear" });
+              else navigate({ mode });
+            }}
+            onStart={() => navigate({ mode: "teach", teachTab: "input" })}
+          />
+        </div>
+      )}
+
+      {!isHome && (
+        <div className={`app-mode-layer ${contentReady ? "is-ready" : ""}`}>
+          {route.mode === "guide" && (
+            <>
+              <SubTabBar
+                tabs={GUIDE_TABS}
+                value={route.guideTab}
+                onChange={(guideTab) => navigate({ mode: "guide", guideTab })}
+              />
+              {route.guideTab === "algs" ? <Algs ctx={ctx} embedded ready={cubeSettled} /> : <LegendPanel ctx={ctx} />}
+            </>
+          )}
+          {route.mode === "teach" && (
+            <>
+              <SubTabBar
+                tabs={TEACH_TABS}
+                value={route.teachTab}
+                onChange={(teachTab) => navigate({ mode: "teach", teachTab })}
+              />
+              <Helper ctx={ctx} embedded tab={route.teachTab} onResultChange={setTeachHasResult} />
+            </>
+          )}
+          {route.mode === "train" && <Playground ctx={ctx} embedded />}
+          {route.mode === "settings" && (
+            <>
+              <SettingsPanel
+                ctx={ctx}
+                mode="settings"
+                variant="inline"
+                hideModeNav
+                activeTab={route.settingsTab}
+                onTabChange={(settingsTab) => navigate({ mode: "settings", settingsTab })}
+                lockOrder={false}
+              />
+              {route.settingsTab === "director" && <Director ctx={ctx} embedded />}
+            </>
+          )}
+          {route.mode === "player" && <Player ctx={ctx} embedded />}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const root = createRoot(document.getElementById("app")!);

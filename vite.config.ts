@@ -5,7 +5,7 @@ export default defineConfig({
   base: "./",
   plugins: [react()],
   resolve: {
-    extensions: [".mjs", ".js", ".ts", ".json"],
+    extensions: [".mjs", ".js", ".mts", ".ts", ".jsx", ".tsx", ".json"],
   },
   server: {
     proxy: {
