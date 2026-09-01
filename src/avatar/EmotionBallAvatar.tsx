@@ -115,7 +115,14 @@ export const EmotionBallAvatar = forwardRef<EmotionBallAvatarRef, EmotionBallAva
       <div
         ref={containerRef}
         className={`emotion-ball-avatar ${className}`}
-        style={{ width: size, height: size, cursor: onClick ? "pointer" : "default", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+        style={{
+          width: `calc(${size}px * var(--ui-scale, 1))`,
+          height: `calc(${size}px * var(--ui-scale, 1))`,
+          cursor: onClick ? "pointer" : "default",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
         onClick={handleClick}
         title="CubeTutor 魔方助手"
       />

@@ -12,6 +12,23 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600;0,9..144,700;0,9..144,800;1,9..144,600;1,9..144,700&family=Noto+Serif+SC:wght@600;700;900&display=swap" rel="stylesheet" />
     <title>Cuber</title>
+    <script>
+      (function () {
+        function applyUiScale() {
+          var w = window.innerWidth;
+          var h = window.innerHeight;
+          if (window.visualViewport) {
+            w = window.visualViewport.width;
+            h = window.visualViewport.height;
+          }
+          var scale = Math.min(1, w / 1440, h / 900);
+          document.documentElement.style.setProperty("--ui-scale", String(Math.max(0.7, scale)));
+        }
+        applyUiScale();
+        window.addEventListener("resize", applyUiScale);
+        if (window.visualViewport) window.visualViewport.addEventListener("resize", applyUiScale);
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>
